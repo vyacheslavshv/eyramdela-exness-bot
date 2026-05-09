@@ -1,0 +1,7 @@
+aiogram
+loguru
+python-dotenv
+tortoise-orm
+aiosqlite
+aerich
+tomlkit

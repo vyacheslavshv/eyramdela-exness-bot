@@ -1,0 +1,12 @@
+TODO.txt
+CLAUDE.md
+data/
+logs/
+.env
+.venv
+venv/
+
+.DS_Store
+__pycache__/
+.cursorignore
+.cursorindexingignore
