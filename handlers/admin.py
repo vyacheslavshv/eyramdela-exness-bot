@@ -167,7 +167,7 @@ async def cmd_check(message: Message) -> None:
     else:
         parts.append(
             "client endpoint: ✅\n"
-            f"```\n{json.dumps(client, indent=2, default=str)[:1500]}\n```"
+            f"{json.dumps(client, indent=2, default=str)[:1500]}"
         )
 
     if accounts is None:
@@ -175,7 +175,7 @@ async def cmd_check(message: Message) -> None:
     else:
         parts.append(
             f"accounts endpoint: {len(accounts)} record(s)\n"
-            f"```\n{json.dumps(accounts, indent=2, default=str)[:1500]}\n```"
+            f"{json.dumps(accounts, indent=2, default=str)[:1500]}"
         )
         if summary:
             parts.append(

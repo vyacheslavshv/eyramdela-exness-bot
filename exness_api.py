@@ -295,7 +295,7 @@ async def resolve_client_uid(user_input: str) -> Optional[str | object]:
         return NOT_FOUND
 
     if _is_uuid(raw):
-        return raw
+        return raw.lower()
 
     raw_lc = raw.lower()
     is_hex = all(c in "0123456789abcdef" for c in raw_lc)

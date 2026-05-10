@@ -101,7 +101,10 @@ async def _create_invite(bot: Bot, telegram_id: int) -> str | None:
         return None
     try:
         link = await bot.create_chat_invite_link(
-            chat_id=CHANNEL_ID, member_limit=1, name=f"vip-{telegram_id}"
+            chat_id=CHANNEL_ID,
+            member_limit=1,
+            name=f"vip-{telegram_id}",
+            expire_date=utcnow() + timedelta(hours=24),
         )
         return link.invite_link
     except Exception as e:
@@ -258,12 +261,12 @@ async def recheck_verified_users(bot: Bot) -> None:
             continue
 
         # ---- balance ≈ 0 after a real deposit history → withdrew everything ----
+        # Don't gate this on is_activated(): once a user qualifies via
+        # ftd_received or ftt_made, those flags persist forever, so the
+        # check would never fire. Brief says: "withdraw all funds → kick".
         had_deposits = (user.last_deposit_total or Decimal("0")) > 0 \
                        or (snap.deposit_total or 0) > 0
-        if had_deposits and (snap.balance or 0) < 1.0 and not is_activated(
-            snap.progress_flags, snap.deposit_total
-        ):
-            # Withdrawn everything AND no fresh activation signal → kick.
+        if had_deposits and (snap.balance or 0) < 1.0:
             await _kick_from_channel(bot, user.telegram_id)
             await _mark_kicked(
                 user, "kicked_zero_balance",
@@ -284,13 +287,14 @@ async def recheck_verified_users(bot: Bot) -> None:
             continue
 
         # ---- inactivity flow ----
+        # Conservative rule: if Exness has not given us a last_trade
+        # timestamp, do NOT warn or kick on inactivity. A user who
+        # qualified by deposit-only would otherwise be kicked
+        # immediately even though they're a paying customer.
         last_trade = snap.last_trade_at
         days_since_trade: float | None
         if last_trade:
             days_since_trade = (now - last_trade).total_seconds() / 86400
-        elif snap.client_status == "INACTIVE":
-            # No timestamp from API but partner-side flag is INACTIVE — treat as old.
-            days_since_trade = float(INACTIVITY_KICK_DAYS) + 1
         else:
             days_since_trade = None
 
@@ -310,11 +314,14 @@ async def recheck_verified_users(bot: Bot) -> None:
             await asyncio.sleep(_PER_REQUEST_DELAY)
             continue
 
-        # Warned + grace expired + still inactive → kick
+        # Warned + grace expired + still inactive → kick.
+        # Only kick if we have a real days_since_trade — never on
+        # missing-timestamp data.
         if user.status == "warned" and user.last_warning_at and \
                 (now - user.last_warning_at).total_seconds() / 86400 \
                 >= WARNING_GRACE_DAYS and \
-                (days_since_trade is None or days_since_trade >= INACTIVITY_WARN_DAYS):
+                days_since_trade is not None and \
+                days_since_trade >= INACTIVITY_WARN_DAYS:
             await _kick_from_channel(bot, user.telegram_id)
             await _mark_kicked(
                 user, "kicked_inactive",

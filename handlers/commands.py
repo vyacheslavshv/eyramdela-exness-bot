@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import html
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from aiogram import Bot, F, Router
@@ -178,7 +178,7 @@ def welcome_text(first_name: str | None) -> str:
 
 HOW_IT_WORKS_TEXT = (
     "ℹ️ How It Works\n\n"
-    "1. Share your phone number (used only for partner verification).\n"
+    "1. Share your phone number.\n"
     "2. Send your Exness account ID.\n"
     "3. We'll check that your account is registered under our partner.\n"
     f"4. Make your first trade OR a deposit ≥ ${int(MIN_DEPOSIT_USD)} to activate.\n"
@@ -240,6 +240,7 @@ async def _generate_invite(bot: Bot, telegram_id: int) -> str | None:
             chat_id=CHANNEL_ID,
             member_limit=1,
             name=f"vip-{telegram_id}",
+            expire_date=utcnow() + timedelta(hours=24),
         )
         return link.invite_link
     except Exception as e:
@@ -570,9 +571,7 @@ async def cb_start_verify(callback: CallbackQuery, state: FSMContext, bot: Bot) 
     except Exception:
         pass
     await callback.message.answer(
-        "📱 First, please share your phone number.\n\n"
-        "It's used for partner verification and admin contact only — "
-        "we do not share it with anyone else.",
+        "📱 First, please share your phone number.",
         reply_markup=kb_phone_request(),
     )
     await callback.answer()
@@ -615,8 +614,7 @@ async def cb_edit_uid(callback: CallbackQuery, state: FSMContext) -> None:
         except Exception:
             pass
         await callback.message.answer(
-            "📱 First, please share your phone number.\n\n"
-            "It's used for partner verification and admin contact only.",
+            "📱 First, please share your phone number.",
             reply_markup=kb_phone_request(),
         )
         await callback.answer()
