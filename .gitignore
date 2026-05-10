@@ -1,12 +1,21 @@
-TODO.txt
-CLAUDE.md
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
 data/
 logs/
-.env
-.venv
-venv/
+*.log*
+nohup.out
+.pid
 
 .DS_Store
-__pycache__/
 .cursorignore
 .cursorindexingignore
+TODO.txt
+
+# IDEs
+.idea/
+.vscode/

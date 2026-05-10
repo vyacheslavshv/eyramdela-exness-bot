@@ -1,7 +1,10 @@
-aiogram
+aiogram>=3.7,<4.0
 loguru
 python-dotenv
 tortoise-orm
 aiosqlite
 aerich
 tomlkit
+aiohttp
+apscheduler>=3.10,<4.0
+phonenumbers
