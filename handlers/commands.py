@@ -82,6 +82,9 @@ def kb_register_or_recheck() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔁 I already registered, re-check", callback_data="start_verify")
     ])
     rows.append([
+        InlineKeyboardButton(text="✏️ Use a different ID", callback_data="edit_uid")
+    ])
+    rows.append([
         InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_to_menu")
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -97,7 +100,29 @@ def kb_pending_help() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔁 Re-check now", callback_data="recheck_pending")
     ])
     rows.append([
+        InlineKeyboardButton(text="✏️ Use a different ID", callback_data="edit_uid")
+    ])
+    rows.append([
         InlineKeyboardButton(text="📊 My Status", callback_data="my_status")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_status(has_uid: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_uid:
+        rows.append([
+            InlineKeyboardButton(text="🔁 Re-check now", callback_data="recheck_pending")
+        ])
+        rows.append([
+            InlineKeyboardButton(text="✏️ Change Exness ID", callback_data="edit_uid")
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton(text="🚀 Get Free VIP Access", callback_data="start_verify")
+        ])
+    rows.append([
+        InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_to_menu")
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -143,6 +168,25 @@ HOW_IT_WORKS_TEXT = (
     "5. Get an invite link to the VIP channel — instantly.\n\n"
     "We re-check your account periodically. As long as it stays under our "
     "partner and you keep trading, you keep your VIP access."
+)
+
+
+WHERE_TO_FIND_UID = (
+    "📍 Where to find your Exness account ID:\n\n"
+    "• Web — sign in at my.exness.com → \"My Accounts\" tab. "
+    "Each trading account has an 8-9 digit number next to it "
+    "(e.g. 12345678).\n"
+    "• Mobile app — open the app → tap your account → the number "
+    "shown above the balance is your ID.\n\n"
+    "It's just digits — not your email, not your password, not the "
+    "partner code. Send the number on its own."
+)
+
+
+UID_PROMPT_TEXT = (
+    "🔑 Send me your Exness account ID (the trading account number "
+    "you see in your Exness dashboard, e.g. 12345678).\n\n"
+    + WHERE_TO_FIND_UID
 )
 
 
@@ -445,7 +489,7 @@ async def cb_my_status(callback: CallbackQuery) -> None:
         f"Last deposit total: "
         f"${float(user.last_deposit_total or 0):.2f}\n"
     )
-    await _safe_edit(callback, summary, reply_markup=kb_back_to_menu())
+    await _safe_edit(callback, summary, reply_markup=kb_status(bool(user.exness_uid)))
     await callback.answer()
 
 
@@ -475,12 +519,7 @@ async def cb_start_verify(callback: CallbackQuery, state: FSMContext, bot: Bot) 
     # If they have phone but not UID, jump straight to UID step.
     if user and user.phone:
         await state.set_state(VerifyState.awaiting_uid)
-        await _safe_edit(
-            callback,
-            "🔑 Send me your Exness account ID (the trading account number "
-            "you see in your Exness dashboard, e.g. 12345678).",
-            reply_markup=kb_cancel(),
-        )
+        await _safe_edit(callback, UID_PROMPT_TEXT, reply_markup=kb_cancel())
         await callback.answer()
         return
 
@@ -513,6 +552,51 @@ async def cb_recheck_pending(callback: CallbackQuery, bot: Bot) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Callback: Edit Exness UID — let the user re-paste a different one
+# ---------------------------------------------------------------------------
+@router.callback_query(F.data == "edit_uid")
+async def cb_edit_uid(callback: CallbackQuery, state: FSMContext) -> None:
+    user = await User.filter(telegram_id=callback.from_user.id).first()
+    if not user:
+        await _safe_edit(
+            callback,
+            welcome_text(callback.from_user.first_name),
+            reply_markup=kb_main_menu(),
+        )
+        await callback.answer()
+        return
+
+    # Phone first if we don't have one yet — falls through to the regular
+    # verify funnel which collects phone before UID.
+    if not user.phone:
+        await state.set_state(VerifyState.awaiting_phone)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(
+            "📱 First, please share your phone number.\n\n"
+            "It's used for partner verification and admin contact only.",
+            reply_markup=kb_phone_request(),
+        )
+        await callback.answer()
+        return
+
+    await state.set_state(VerifyState.awaiting_uid)
+    current = user.exness_uid or "—"
+    await _safe_edit(
+        callback,
+        f"✏️ Change your Exness account ID\n\n"
+        f"Current ID on file: {current}\n\n"
+        f"Send your correct Exness account ID below and we'll re-check "
+        f"automatically.\n\n"
+        + WHERE_TO_FIND_UID,
+        reply_markup=kb_cancel(),
+    )
+    await callback.answer()
+
+
+# ---------------------------------------------------------------------------
 # FSM: receive phone
 # ---------------------------------------------------------------------------
 @router.message(StateFilter(VerifyState.awaiting_phone), F.contact)
@@ -533,11 +617,7 @@ async def on_phone_contact(message: Message, state: FSMContext) -> None:
         "✅ Got it.",
         reply_markup=ReplyKeyboardRemove(),
     )
-    await message.answer(
-        "🔑 Now send me your Exness account ID (the trading account "
-        "number you see in your Exness dashboard, e.g. 12345678).",
-        reply_markup=kb_cancel(),
-    )
+    await message.answer(UID_PROMPT_TEXT, reply_markup=kb_cancel())
 
 
 @router.message(StateFilter(VerifyState.awaiting_phone), F.text)
@@ -555,11 +635,7 @@ async def on_phone_text(message: Message, state: FSMContext) -> None:
     await User.filter(telegram_id=message.from_user.id).update(phone=phone)
     await state.set_state(VerifyState.awaiting_uid)
     await message.answer("✅ Got it.", reply_markup=ReplyKeyboardRemove())
-    await message.answer(
-        "🔑 Now send me your Exness account ID (the trading account "
-        "number you see in your Exness dashboard, e.g. 12345678).",
-        reply_markup=kb_cancel(),
-    )
+    await message.answer(UID_PROMPT_TEXT, reply_markup=kb_cancel())
 
 
 # ---------------------------------------------------------------------------
