@@ -179,8 +179,8 @@ WHERE_TO_FIND_UID = (
     "(e.g. 12345678).\n"
     "• Mobile app — open the app → tap your account → the number "
     "shown above the balance is your ID.\n\n"
-    "It's just digits — not your email, not your password, not the "
-    "partner code. Send the number on its own."
+    "Either the trading account number (digits) or the full Client "
+    "UUID will work. It's never your email, password, or partner code."
 )
 
 
@@ -249,6 +249,16 @@ async def _persist_snapshot(user: User, snapshot) -> None:
         user.last_deposit_total = Decimal("0")
     user.last_trade_at = snapshot.last_trade_at
     user.consecutive_api_errors = 0
+
+    # Once we know the canonical UUID, persist it so future re-checks
+    # skip the full accounts scan. Skip the upgrade if it would clash
+    # with another user's stored UUID.
+    canonical = getattr(snapshot, "client_uid", None)
+    if canonical and user.exness_uid != canonical:
+        clash = await User.filter(exness_uid=canonical).exclude(id=user.id).first()
+        if not clash:
+            user.exness_uid = canonical
+
     await user.save()
 
 
@@ -650,14 +660,18 @@ async def on_phone_text(message: Message, state: FSMContext) -> None:
 @router.message(StateFilter(VerifyState.awaiting_uid), F.text)
 async def on_uid_input(message: Message, state: FSMContext, bot: Bot) -> None:
     raw = (message.text or "").strip()
-    uid = "".join(ch for ch in raw if ch.isdigit())
-    if not uid or len(uid) < 4:
+    # Accept either a numeric trading account number (e.g. 87654321), the
+    # 8-char hex Client ID prefix Exness emails to partners, or a full UUID.
+    cleaned = "".join(ch for ch in raw if ch.isalnum() or ch == "-").strip("-")
+    if not cleaned or len(cleaned) < 4:
         await message.answer(
             "That doesn't look like a valid Exness account ID.\n\n"
-            "It should be a number — e.g. 12345678. Try again, or tap Cancel.",
+            "Send your trading account number (8-9 digits, e.g. 12345678) "
+            "or your full Client UUID. Try again, or tap Cancel.",
             reply_markup=kb_cancel(),
         )
         return
+    uid = cleaned
 
     # Prevent two Telegram users from claiming the same UID.
     other = await User.filter(exness_uid=uid).exclude(telegram_id=message.from_user.id).first()

@@ -215,44 +215,126 @@ async def _accounts_full_scan() -> Optional[list[dict]]:
     return []
 
 
-async def resolve_client_uid(user_input: str) -> Optional[str | object]:
+async def _clients_paginated(max_pages: int = 20, page_size: int = 200) -> Optional[list[dict]]:
+    """Page through /api/v2/reports/clients/ and return every row.
+
+    The Exness API truncates ``client_uid`` to 8 hex chars in the
+    ``/accounts/`` endpoint but returns the full 36-char UUID here, so
+    we use this scan whenever we need to upgrade a short id (or numeric
+    trading account) to the canonical UUID.
     """
-    Try to map whatever the user pasted (UUID, account number, or even a
-    concatenation) to a real client_uid (UUID).
+    out: list[dict] = []
+    for page in range(max_pages):
+        offset = page * page_size
+        data = await _api_get(
+            "/api/v2/reports/clients/",
+            params={"limit": page_size, "offset": offset},
+        )
+        if data is None:
+            return None
+        items = (
+            data.get("data")
+            if isinstance(data, dict)
+            else (data if isinstance(data, list) else [])
+        )
+        if not items:
+            break
+        out.extend(items)
+        totals = data.get("totals") if isinstance(data, dict) else {}
+        avail = (totals or {}).get("available_for_request") or 0
+        if len(out) >= avail > 0:
+            break
+        if len(items) < page_size:
+            break
+    return out
+
+
+async def _short_uid_from_account_number(raw_digits: str) -> Optional[str | object]:
+    """Map a numeric trading account number to the (truncated) client_uid
+    via the /accounts/ endpoint.
 
     Returns:
-      * str        — resolved UUID
-      * the dict   — a special sentinel ``NOT_FOUND`` (see below) when the
-                     API answered definitively "no such client"
-      * None       — transient error
+      * str       — short hex client_uid (e.g. "bcd562bb")
+      * NOT_FOUND — no such trading account under this partner
+      * None      — transient error
+    """
+    accounts = await _accounts_search(raw_digits)
+    if accounts is None:
+        return None
+    for acc in accounts:
+        if str(acc.get("client_account") or "") == raw_digits:
+            cu = (acc.get("client_uid") or "").lower()
+            if cu:
+                return cu
+
+    full = await _accounts_full_scan()
+    if full is None:
+        return None
+    for acc in full:
+        if str(acc.get("client_account") or "") == raw_digits:
+            cu = (acc.get("client_uid") or "").lower()
+            if cu:
+                return cu
+    return NOT_FOUND
+
+
+async def resolve_client_uid(user_input: str) -> Optional[str | object]:
+    """Map a user-typed identifier to the canonical full UUID.
+
+    Accepts:
+      * Full UUID  (bcd562bb-1bed-49d4-b63e-b4354657dba5) → returned as-is.
+      * Hex prefix (bcd562bb, ≥6 hex chars) → upgraded via /clients/ scan.
+      * Trading account number (250324410, digits) → resolved via
+        /accounts/ then upgraded via /clients/ scan.
+
+    Returns:
+      * str         — full UUID
+      * NOT_FOUND   — definitive miss
+      * None        — transient API error
     """
     raw = (user_input or "").strip()
     if not raw:
         return NOT_FOUND
 
-    # Already a UUID? Use it as-is.
     if _is_uuid(raw):
         return raw
 
-    # Accounts endpoint accepts numeric inputs without 500'ing.
-    accounts = await _accounts_search(raw)
-    if accounts is None:
-        return None  # transient
-    for acc in accounts:
-        cu = acc.get("client_uid")
-        if cu:
-            return cu
+    raw_lc = raw.lower()
+    is_hex = all(c in "0123456789abcdef" for c in raw_lc)
 
-    # Fallback: scan all partner accounts and match on client_account.
-    full = await _accounts_full_scan()
-    if full is None:
+    short_uid: Optional[str] = None
+    if raw.isdigit():
+        # Trading account number flow.
+        result = await _short_uid_from_account_number(raw)
+        if result is None:
+            return None
+        if isinstance(result, _NotFoundSentinel):
+            return NOT_FOUND
+        short_uid = result
+    elif is_hex and len(raw_lc) >= 6:
+        short_uid = raw_lc
+    else:
+        return NOT_FOUND
+
+    # Upgrade short uid → full UUID via /clients/ scan.
+    full_clients = await _clients_paginated()
+    if full_clients is None:
         return None
-    for acc in full:
-        if str(acc.get("client_account") or "") == str(raw):
-            cu = acc.get("client_uid")
-            if cu:
-                return cu
 
+    matches: set[str] = set()
+    for c in full_clients:
+        cu = c.get("client_uid") or ""
+        if cu.lower().startswith(short_uid):
+            matches.add(cu)
+
+    if len(matches) == 1:
+        return next(iter(matches))
+    if len(matches) > 1:
+        logger.warning(
+            f"resolve_client_uid: ambiguous prefix '{short_uid}' matched "
+            f"{len(matches)} clients"
+        )
+        return NOT_FOUND
     return NOT_FOUND
 
 
