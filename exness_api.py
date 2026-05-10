@@ -544,11 +544,15 @@ async def fetch_snapshot(uid: str) -> Optional[ClientSnapshot]:
     progress_flags = _flags_from_record(row)
 
     # Exness returns placeholder "1" for deposit_amount / client_balance /
-    # client_equity on accounts that never made a real deposit. The only
-    # truly reliable signal is the boolean flags, so zero those numbers
-    # out when ftd_received is false to avoid spurious "had deposits"
-    # logic downstream.
-    if "ftd_received" not in progress_flags:
+    # client_equity / ftd_amount on accounts that have never made a real
+    # deposit AND never traded. The only truly reliable signals are the
+    # boolean flags, so zero those numbers out when neither flag is set
+    # — a user with ftt_made (rare bonus-only account) might still have a
+    # real balance, so we leave their numbers alone.
+    has_real_activity = (
+        "ftd_received" in progress_flags or "ftt_made" in progress_flags
+    )
+    if not has_real_activity:
         deposit_total = 0.0
         balance = 0.0
 
