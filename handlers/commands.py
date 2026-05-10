@@ -26,6 +26,8 @@ from config import (
     ADMIN_IDS,
     BRAND_NAME,
     CHANNEL_ID,
+    EXNESS_DEPOSIT_URL,
+    EXNESS_PA_URL,
     EXNESS_PARTNER_CODE,
     EXNESS_REFERRAL_LINK,
     MIN_DEPOSIT_USD,
@@ -49,12 +51,21 @@ class VerifyState(StatesGroup):
 # ---------------------------------------------------------------------------
 # Keyboards
 # ---------------------------------------------------------------------------
-def kb_main_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def kb_main_menu(has_uid: bool = False) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="🚀 Get Free VIP Access", callback_data="start_verify")],
         [InlineKeyboardButton(text="ℹ️ How It Works", callback_data="how_it_works")],
         [InlineKeyboardButton(text="📊 Check My Status", callback_data="my_status")],
-    ])
+    ]
+    if has_uid:
+        rows.append([
+            InlineKeyboardButton(text="✏️ Change Exness ID", callback_data="edit_uid")
+        ])
+    if EXNESS_REFERRAL_LINK:
+        rows.append([
+            InlineKeyboardButton(text="🟢 Register on Exness", url=EXNESS_REFERRAL_LINK)
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb_back_to_menu() -> InlineKeyboardMarkup:
@@ -92,16 +103,20 @@ def kb_register_or_recheck() -> InlineKeyboardMarkup:
 
 
 def kb_pending_help() -> InlineKeyboardMarkup:
+    """Pending state: user is registered under our partner but not yet
+    activated. Show shortcuts to do exactly that — deposit or trade —
+    not back to registration."""
     rows: list[list[InlineKeyboardButton]] = []
-    if EXNESS_REFERRAL_LINK:
+    if EXNESS_DEPOSIT_URL:
         rows.append([
-            InlineKeyboardButton(text="🟢 Open Exness", url=EXNESS_REFERRAL_LINK)
+            InlineKeyboardButton(text="💵 Make a Deposit", url=EXNESS_DEPOSIT_URL)
+        ])
+    if EXNESS_PA_URL:
+        rows.append([
+            InlineKeyboardButton(text="📈 Open Exness (Trade)", url=EXNESS_PA_URL)
         ])
     rows.append([
         InlineKeyboardButton(text="🔁 Re-check now", callback_data="recheck_pending")
-    ])
-    rows.append([
-        InlineKeyboardButton(text="✏️ Use a different ID", callback_data="edit_uid")
     ])
     rows.append([
         InlineKeyboardButton(text="📊 My Status", callback_data="my_status")
@@ -209,11 +224,11 @@ async def _audit(telegram_id: int, event: str, detail: str | None = None) -> Non
         logger.warning(f"audit log write failed: {e}")
 
 
-async def _send_main_menu(target_message: Message, first_name: str | None) -> None:
-    await target_message.answer(
-        welcome_text(first_name),
-        reply_markup=kb_main_menu(),
-    )
+async def _kb_main_menu_for(telegram_id: int) -> InlineKeyboardMarkup:
+    """Build the main menu with the 'Change Exness ID' button shown only
+    if the user already has a UID on file."""
+    user = await User.filter(telegram_id=telegram_id).first()
+    return kb_main_menu(has_uid=bool(user and user.exness_uid))
 
 
 async def _generate_invite(bot: Bot, telegram_id: int) -> str | None:
@@ -418,11 +433,14 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         await message.answer(
             "👋 Welcome back!\n\n"
             "You can re-verify your Exness account below to regain access.",
-            reply_markup=kb_main_menu(),
+            reply_markup=kb_main_menu(has_uid=bool(user.exness_uid)),
         )
         return
 
-    await message.answer(welcome_text(tg.first_name), reply_markup=kb_main_menu())
+    await message.answer(
+        welcome_text(tg.first_name),
+        reply_markup=kb_main_menu(has_uid=bool(user.exness_uid)),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +460,7 @@ async def cb_back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await _safe_edit(
         callback, welcome_text(callback.from_user.first_name),
-        reply_markup=kb_main_menu(),
+        reply_markup=await _kb_main_menu_for(callback.from_user.id),
     )
     await callback.answer()
 
@@ -462,7 +480,7 @@ async def cb_cancel_verify(callback: CallbackQuery, state: FSMContext) -> None:
         pass
     await _safe_edit(
         callback, welcome_text(callback.from_user.first_name),
-        reply_markup=kb_main_menu(),
+        reply_markup=await _kb_main_menu_for(callback.from_user.id),
     )
     await callback.answer()
 

@@ -75,6 +75,14 @@ EXNESS_PASSWORD = os.getenv("EXNESS_PASSWORD", "")
 EXNESS_REFERRAL_LINK = os.getenv("EXNESS_REFERRAL_LINK", "")
 EXNESS_PARTNER_CODE = os.getenv("EXNESS_PARTNER_CODE", "")
 
+# Customer-facing deep links into the Exness PA, shown to a user who has
+# already registered and just needs to deposit / trade to activate.
+EXNESS_DEPOSIT_URL = os.getenv(
+    "EXNESS_DEPOSIT_URL",
+    "https://my.exness.com/pa/payments-and-wallet/deposit",
+)
+EXNESS_PA_URL = os.getenv("EXNESS_PA_URL", "https://my.exness.com/pa/")
+
 # --- Logic tuning ---
 MIN_DEPOSIT_USD = _float("MIN_DEPOSIT_USD", 50.0)
 INACTIVITY_WARN_DAYS = _int("INACTIVITY_WARN_DAYS", 11)
