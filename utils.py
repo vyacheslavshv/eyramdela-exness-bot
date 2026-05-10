@@ -108,6 +108,7 @@ async def init_db() -> None:
         "last_check_at TIMESTAMP",
         "last_warning_at TIMESTAMP",
         "kicked_at TIMESTAMP",
+        "pending_since TIMESTAMP",
         "last_client_status VARCHAR(20)",
         "last_progress_flags TEXT",
         "last_deposit_total NUMERIC(14, 2)",

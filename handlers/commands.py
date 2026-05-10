@@ -31,6 +31,7 @@ from config import (
     EXNESS_PARTNER_CODE,
     EXNESS_REFERRAL_LINK,
     MIN_DEPOSIT_USD,
+    PENDING_AUTO_GIVEUP_HOURS,
     PENDING_POLL_MINUTES,
 )
 from exness_api import fetch_snapshot, is_activated
@@ -350,21 +351,26 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
                 reply_markup=kb_verified(None),
             )
     else:
-        await user.update_from_dict({"status": "pending"}).save()
+        await user.update_from_dict({
+            "status": "pending",
+            "pending_since": utcnow(),
+        }).save()
         await _audit(
             user.telegram_id,
             "pending_activation",
             f"flags={snapshot.progress_flags} deposit={snapshot.deposit_total}",
         )
         poll = max(1, int(PENDING_POLL_MINUTES))
+        giveup = max(1, int(PENDING_AUTO_GIVEUP_HOURS))
         await message.answer(
             "🟡 Almost there!\n\n"
             "Your Exness account is registered under our partner, but it's "
             "not yet activated. To activate, do one of the following:\n\n"
             f"• Place your first trade, or\n"
             f"• Make a deposit of ${int(MIN_DEPOSIT_USD)} or more.\n\n"
-            f"We'll auto-check every ~{poll} minutes and let you know when "
-            "you're in.",
+            f"We'll auto-check every ~{poll} minutes for the next "
+            f"{giveup} hours. After that, just tap \"Re-check now\" "
+            "whenever you're ready.",
             reply_markup=kb_pending_help(),
         )
 

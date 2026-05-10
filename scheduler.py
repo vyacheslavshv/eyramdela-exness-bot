@@ -35,6 +35,7 @@ from config import (
     INACTIVITY_KICK_DAYS,
     INACTIVITY_WARN_DAYS,
     MIN_DEPOSIT_USD,
+    PENDING_AUTO_GIVEUP_HOURS,
     PENDING_POLL_MINUTES,
     RECHECK_INTERVAL_HOURS,
     WARNING_GRACE_DAYS,
@@ -135,12 +136,30 @@ async def _mark_kicked(user: User, event: str, detail: str | None = None) -> Non
 # Job 1 — pending users
 # ---------------------------------------------------------------------------
 async def check_pending_users(bot: Bot) -> None:
-    pending = await User.filter(status="pending", exness_uid__not_isnull=True).all()
-    if not pending:
+    # Auto-poll only users who recently entered pending. Anyone who's been
+    # pending past the giveup window is left alone — they can resume by
+    # tapping "Re-check now" or sending /start, which resets the window.
+    cutoff = utcnow() - timedelta(hours=max(0.1, float(PENDING_AUTO_GIVEUP_HOURS)))
+    pending = await User.filter(
+        status="pending", exness_uid__not_isnull=True
+    ).all()
+    fresh = [
+        u for u in pending if (u.pending_since or u.started_at) and
+        (u.pending_since or u.started_at) > cutoff
+    ]
+    if not fresh:
+        if pending:
+            logger.debug(
+                f"scheduler: {len(pending)} pending user(s) but all past "
+                f"the {PENDING_AUTO_GIVEUP_HOURS}h giveup window"
+            )
         return
-    logger.debug(f"scheduler: {len(pending)} pending user(s) to re-check")
+    logger.debug(
+        f"scheduler: {len(fresh)} fresh pending user(s) to re-check "
+        f"({len(pending) - len(fresh)} skipped, past giveup window)"
+    )
 
-    for user in pending:
+    for user in fresh:
         try:
             snap = await fetch_snapshot(user.exness_uid)
         except Exception as e:

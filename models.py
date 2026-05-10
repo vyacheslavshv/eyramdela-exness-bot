@@ -20,6 +20,7 @@ class User(Model):
     last_check_at = fields.DatetimeField(null=True)
     last_warning_at = fields.DatetimeField(null=True)
     kicked_at = fields.DatetimeField(null=True)
+    pending_since = fields.DatetimeField(null=True)     # set on entering "pending"; scheduler uses this to time out idle users
 
     last_client_status = fields.CharField(max_length=20, null=True)
     last_progress_flags = fields.TextField(null=True)             # JSON list
