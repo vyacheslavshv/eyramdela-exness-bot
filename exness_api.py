@@ -541,11 +541,21 @@ async def fetch_snapshot(uid: str) -> Optional[ClientSnapshot]:
         else row.get("client_equity")
     )
     last_trade = _last_trade_from_record(row)
+    progress_flags = _flags_from_record(row)
+
+    # Exness returns placeholder "1" for deposit_amount / client_balance /
+    # client_equity on accounts that never made a real deposit. The only
+    # truly reliable signal is the boolean flags, so zero those numbers
+    # out when ftd_received is false to avoid spurious "had deposits"
+    # logic downstream.
+    if "ftd_received" not in progress_flags:
+        deposit_total = 0.0
+        balance = 0.0
 
     return ClientSnapshot(
         under_partner=True,
         client_status=row.get("client_status"),
-        progress_flags=_flags_from_record(row),
+        progress_flags=progress_flags,
         deposit_total=deposit_total,
         balance=balance,
         last_trade_at=last_trade,

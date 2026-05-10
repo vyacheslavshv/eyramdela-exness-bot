@@ -261,11 +261,11 @@ async def recheck_verified_users(bot: Bot) -> None:
             continue
 
         # ---- balance ≈ 0 after a real deposit history → withdrew everything ----
-        # Don't gate this on is_activated(): once a user qualifies via
-        # ftd_received or ftt_made, those flags persist forever, so the
-        # check would never fire. Brief says: "withdraw all funds → kick".
-        had_deposits = (user.last_deposit_total or Decimal("0")) > 0 \
-                       or (snap.deposit_total or 0) > 0
+        # Trust the ftd_received flag as the truth source: numeric
+        # deposit_amount / client_balance can be the placeholder "1" that
+        # Exness returns for never-deposited accounts. Once a user has
+        # ftd_received=true, an empty balance signals a withdrawal.
+        had_deposits = "ftd_received" in (snap.progress_flags or [])
         if had_deposits and (snap.balance or 0) < 1.0:
             await _kick_from_channel(bot, user.telegram_id)
             await _mark_kicked(
