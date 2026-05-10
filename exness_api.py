@@ -251,26 +251,24 @@ async def _clients_paginated(max_pages: int = 20, page_size: int = 200) -> Optio
 
 async def _short_uid_from_account_number(raw_digits: str) -> Optional[str | object]:
     """Map a numeric trading account number to the (truncated) client_uid
-    via the /accounts/ endpoint.
+    via the /accounts/ endpoint's ``client_account`` filter.
 
     Returns:
       * str       — short hex client_uid (e.g. "bcd562bb")
       * NOT_FOUND — no such trading account under this partner
       * None      — transient error
     """
-    accounts = await _accounts_search(raw_digits)
-    if accounts is None:
+    data = await _api_get(
+        "/api/reports/clients/accounts/", params={"client_account": raw_digits}
+    )
+    if data is None:
         return None
-    for acc in accounts:
-        if str(acc.get("client_account") or "") == raw_digits:
-            cu = (acc.get("client_uid") or "").lower()
-            if cu:
-                return cu
-
-    full = await _accounts_full_scan()
-    if full is None:
-        return None
-    for acc in full:
+    items = (
+        data.get("data")
+        if isinstance(data, dict)
+        else (data if isinstance(data, list) else [])
+    )
+    for acc in items:
         if str(acc.get("client_account") or "") == raw_digits:
             cu = (acc.get("client_uid") or "").lower()
             if cu:
