@@ -61,8 +61,8 @@ sudo ./deploy.sh
 | `EXNESS_BASE_URL` | `https://my.exnessaffiliates.com` |
 | `EXNESS_LOGIN` | Your Exness partner-area email |
 | `EXNESS_PASSWORD` | Your Exness partner-area password |
-| `EXNESS_REFERRAL_LINK` | Your public referral URL to share |
-| `EXNESS_PARTNER_CODE` | Optional, used in display only |
+| `EXNESS_REFERRAL_LINK` | Your sign-up referral URL. Use the **direct sign-up form** — `https://one.exnessonelink.com/boarding/sign-up/a/<your_code>`. The bare `/a/<code>` link sometimes lands on a generic page instead of the registration form. |
+| `EXNESS_PARTNER_CODE` | Your partner code (e.g. `gxzo6189vp`). Shown to users who already have an Exness account so they can ask Exness Live Chat to switch their partner code to yours. |
 | `MIN_DEPOSIT_USD` | Activation threshold (default `50`) |
 | `INACTIVITY_WARN_DAYS` | DM a warning after this many days idle (default `11`) |
 | `INACTIVITY_KICK_DAYS` | Kick threshold for hard inactivity (default `14`) |

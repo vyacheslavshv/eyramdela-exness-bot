@@ -25,6 +25,7 @@ from config import (
     ADMIN_IDS,
     BRAND_NAME,
     CHANNEL_ID,
+    EXNESS_PARTNER_CODE,
     EXNESS_REFERRAL_LINK,
     MIN_DEPOSIT_USD,
     PENDING_POLL_MINUTES,
@@ -233,9 +234,14 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
         await _audit(user.telegram_id, "not_under_partner", f"uid={user.exness_uid}")
         await message.answer(
             "❌ This Exness account is not registered under our partner yet.\n\n"
-            "Make sure you used our referral link when signing up. If you "
-            "already have an Exness account, you can switch your partner "
-            "from inside Exness and then re-check.",
+            "How to fix this:\n"
+            "• If you don't have an Exness account yet — tap the green "
+            "button below to register through our partner link.\n"
+            "• If you already have an account — open Exness Live Chat "
+            "(inside your Exness profile) and ask support to change your "
+            "partner code. They'll need our partner code:\n"
+            f"  {EXNESS_PARTNER_CODE or '<see admin>'}\n\n"
+            "Once it's done, tap \"I already registered, re-check\" below.",
             reply_markup=kb_register_or_recheck(),
         )
         return
