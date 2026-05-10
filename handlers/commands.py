@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -276,6 +277,10 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
             "last_client_status": None,
         }).save()
         await _audit(user.telegram_id, "not_under_partner", f"uid={user.exness_uid}")
+        if EXNESS_PARTNER_CODE:
+            code_block = f"<code>{html.escape(EXNESS_PARTNER_CODE)}</code> (tap to copy)"
+        else:
+            code_block = "(ask the admin for the partner code)"
         await message.answer(
             "❌ This Exness account is not registered under our partner yet.\n\n"
             "How to fix this:\n"
@@ -283,10 +288,11 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
             "button below to register through our partner link.\n"
             "• If you already have an account — open Exness Live Chat "
             "(inside your Exness profile) and ask support to change your "
-            "partner code. They'll need our partner code:\n"
-            f"  {EXNESS_PARTNER_CODE or '<see admin>'}\n\n"
+            "partner code. They'll need our partner code:\n\n"
+            f"{code_block}\n\n"
             "Once it's done, tap \"I already registered, re-check\" below.",
             reply_markup=kb_register_or_recheck(),
+            parse_mode="HTML",
         )
         return
 
