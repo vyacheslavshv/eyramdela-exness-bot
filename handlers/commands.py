@@ -232,7 +232,7 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
         }).save()
         await _audit(user.telegram_id, "not_under_partner", f"uid={user.exness_uid}")
         await message.answer(
-            "❌ This Exness account is **not** registered under our partner yet.\n\n"
+            "❌ This Exness account is not registered under our partner yet.\n\n"
             "Make sure you used our referral link when signing up. If you "
             "already have an Exness account, you can switch your partner "
             "from inside Exness and then re-check.",
@@ -279,7 +279,7 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
         await message.answer(
             "🟡 Almost there!\n\n"
             "Your Exness account is registered under our partner, but it's "
-            "not yet activated. To activate, do **one** of the following:\n\n"
+            "not yet activated. To activate, do one of the following:\n\n"
             f"• Place your first trade, or\n"
             f"• Make a deposit of ${int(MIN_DEPOSIT_USD)} or more.\n\n"
             f"We'll auto-check every ~{poll} minutes and let you know when "
@@ -471,7 +471,7 @@ async def cb_start_verify(callback: CallbackQuery, state: FSMContext, bot: Bot) 
         await state.set_state(VerifyState.awaiting_uid)
         await _safe_edit(
             callback,
-            "🔑 Send me your **Exness account ID** (the trading account number "
+            "🔑 Send me your Exness account ID (the trading account number "
             "you see in your Exness dashboard, e.g. 12345678).",
             reply_markup=kb_cancel(),
         )
@@ -514,7 +514,7 @@ async def on_phone_contact(message: Message, state: FSMContext) -> None:
     contact = message.contact
     if contact.user_id and contact.user_id != message.from_user.id:
         await message.answer(
-            "Please share **your own** phone number using the button below.",
+            "Please share your own phone number using the button below.",
             reply_markup=kb_phone_request(),
         )
         return
@@ -528,7 +528,7 @@ async def on_phone_contact(message: Message, state: FSMContext) -> None:
         reply_markup=ReplyKeyboardRemove(),
     )
     await message.answer(
-        "🔑 Now send me your **Exness account ID** (the trading account "
+        "🔑 Now send me your Exness account ID (the trading account "
         "number you see in your Exness dashboard, e.g. 12345678).",
         reply_markup=kb_cancel(),
     )
@@ -541,7 +541,7 @@ async def on_phone_text(message: Message, state: FSMContext) -> None:
     if not phone or len(phone) < 8:
         await message.answer(
             "That doesn't look like a valid phone number.\n\n"
-            "Please tap the **Share my phone** button below, "
+            "Please tap the \"Share my phone\" button below, "
             "or type the number in international format (e.g. +14155551234).",
             reply_markup=kb_phone_request(),
         )
@@ -550,7 +550,7 @@ async def on_phone_text(message: Message, state: FSMContext) -> None:
     await state.set_state(VerifyState.awaiting_uid)
     await message.answer("✅ Got it.", reply_markup=ReplyKeyboardRemove())
     await message.answer(
-        "🔑 Now send me your **Exness account ID** (the trading account "
+        "🔑 Now send me your Exness account ID (the trading account "
         "number you see in your Exness dashboard, e.g. 12345678).",
         reply_markup=kb_cancel(),
     )
