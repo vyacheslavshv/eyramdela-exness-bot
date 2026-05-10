@@ -25,6 +25,40 @@ router.message.filter(F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
 USERS_PAGE_SIZE = 30
 BROADCAST_DELAY = 0.04   # ~25 msg/sec, under the 30 msg/sec global limit
 
+# Telegram caps text messages at 4096 chars. We send up to this many per
+# chunk and prefer to break on newline boundaries.
+MSG_CHUNK_SIZE = 3500
+
+
+async def _send_long(message: Message, text: str,
+                     chunk_size: int = MSG_CHUNK_SIZE) -> None:
+    """Send `text` in chunks, splitting on newline boundaries when possible.
+
+    Each chunk stays under chunk_size chars (well under Telegram's 4096
+    limit). If a single line is itself longer than chunk_size, that line
+    is hard-split — accepted, since admin output rarely contains such
+    monsters and the alternative is failing the send entirely.
+    """
+    if not text:
+        return
+    if len(text) <= chunk_size:
+        await message.answer(text)
+        return
+
+    pos = 0
+    while pos < len(text):
+        end = pos + chunk_size
+        if end >= len(text):
+            await message.answer(text[pos:])
+            return
+        nl = text.rfind("\n", pos, end)
+        if nl > pos:
+            await message.answer(text[pos:nl])
+            pos = nl + 1
+        else:
+            await message.answer(text[pos:end])
+            pos = end
+
 
 HELP_TEXT = (
     "🛠 Admin commands\n\n"
@@ -184,10 +218,7 @@ async def cmd_check(message: Message) -> None:
                 f"last_trade_at={summary['last_trade_at']}"
             )
 
-    out = "\n\n".join(parts)
-    # Telegram cap is 4096; chunk if needed.
-    for i in range(0, len(out), 3500):
-        await message.answer(out[i:i + 3500])
+    await _send_long(message, "\n\n".join(parts))
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +343,7 @@ async def cmd_users(message: Message) -> None:
         )
 
     header = f"{status.capitalize()} ({total}) — page {page}/{total_pages}\n\n"
-    await message.answer(header + "\n".join(lines))
+    await _send_long(message, header + "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +451,7 @@ async def cmd_audit(message: Message) -> None:
         for r in rows
     ]
     text = "🧾 Audit log (most recent first)\n\n" + "\n".join(lines)
-    for i in range(0, len(text), 3500):
-        await message.answer(text[i:i + 3500])
+    await _send_long(message, text)
 
 
 # ---------------------------------------------------------------------------
