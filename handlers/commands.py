@@ -24,6 +24,7 @@ from aiogram.types import (
 from loguru import logger
 
 from config import (
+    ACTIVATION_REQUIRE_TRADE,
     ADMIN_IDS,
     BRAND_NAME,
     CHANNEL_ID,
@@ -496,12 +497,18 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
         )
         poll = max(1, int(PENDING_POLL_MINUTES))
         giveup = max(1, int(PENDING_AUTO_GIVEUP_HOURS))
+        if ACTIVATION_REQUIRE_TRADE:
+            steps = (
+                f"1️⃣ Make a deposit of ${int(MIN_DEPOSIT_USD)} or more.\n"
+                "2️⃣ Place at least one trade.\n"
+            )
+        else:
+            steps = f"➡️ Make a deposit of ${int(MIN_DEPOSIT_USD)} or more.\n"
         await message.answer(
             "🟡 Almost there!\n\n"
             "Your Exness account is connected under our partner, but it's "
-            "not activated yet. To activate, do one of the following:\n\n"
-            "• Place your first trade, or\n"
-            f"• Make a deposit of ${int(MIN_DEPOSIT_USD)} or more.\n\n"
+            "not activated yet. To activate:\n\n"
+            f"{steps}\n"
             f"We'll auto-check every ~{poll} minutes for the next {giveup} "
             "hours. After that, tap “Re-check now” whenever you're ready.",
             reply_markup=kb_pending_help(),
@@ -562,6 +569,7 @@ ADMIN_PANEL_TEXT = (
     "/stats — counts per status\n"
     "/user <telegram_id|email|UID> — user info\n"
     "/check <UID> — manual API check\n"
+    "/recheck <telegram_id|email|UID> — force re-verification now\n"
     "/kick <telegram_id> — manual kick\n"
     "/unflag <telegram_id> — restore user\n"
     "/users [status] [page] — paginated list\n"
@@ -603,11 +611,13 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         return
 
     if user.status == "pending":
+        need = f"a deposit of ${int(MIN_DEPOSIT_USD)} or more"
+        if ACTIVATION_REQUIRE_TRADE:
+            need += " plus at least one trade"
         await message.answer(
             "🟡 You're in the queue.\n\n"
-            "We're waiting for your account to activate (first trade or a "
-            f"deposit ≥ ${int(MIN_DEPOSIT_USD)}). Once it does, we'll DM "
-            "your invite link.",
+            f"We're waiting for your account to activate ({need}). Once it "
+            "does, we'll DM your invite link.",
             reply_markup=kb_pending_help(),
         )
         return

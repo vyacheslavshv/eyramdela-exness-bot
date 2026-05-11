@@ -85,6 +85,9 @@ EXNESS_PA_URL = os.getenv("EXNESS_PA_URL", "https://my.exness.com/pa/")
 
 # --- Logic tuning ---
 MIN_DEPOSIT_USD = _float("MIN_DEPOSIT_USD", 50.0)
+# Activation requires a first-time deposit ≥ MIN_DEPOSIT_USD. If this is
+# true, the user must ALSO have placed a first trade.
+ACTIVATION_REQUIRE_TRADE = _bool("ACTIVATION_REQUIRE_TRADE", False)
 INACTIVITY_WARN_DAYS = _int("INACTIVITY_WARN_DAYS", 11)
 INACTIVITY_KICK_DAYS = _int("INACTIVITY_KICK_DAYS", 14)
 RECHECK_INTERVAL_HOURS = _float("RECHECK_INTERVAL_HOURS", 6.0)

@@ -65,6 +65,7 @@ HELP_TEXT = (
     "/stats — counts per status, today's activity\n"
     "/user <telegram_id|email|UID> — full info dump for one user\n"
     "/check <UID> — manual API check, dump raw response\n"
+    "/recheck <telegram_id|email|UID> — force re-verification now (incl. kick path)\n"
     "/kick <telegram_id> — manual kick + DB update + audit\n"
     "/unflag <telegram_id> — restore kicked/warned user\n"
     "/users [status] [page] — list users by status\n"
@@ -306,6 +307,41 @@ async def cmd_unflag(message: Message, bot: Bot) -> None:
         telegram_id=tid, event="unflagged_by_admin", detail="manual /unflag"
     )
     await message.answer(f"Unflagged {tid}. Status set to verified.")
+
+
+# ---------------------------------------------------------------------------
+# /recheck — force a re-verification of one user right now (same logic the
+# scheduler runs every RECHECK_INTERVAL_HOURS, including the kick path).
+# ---------------------------------------------------------------------------
+@router.message(Command("recheck"))
+async def cmd_recheck(message: Message, bot: Bot) -> None:
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Usage: /recheck <telegram_id | email | exness_uid>")
+        return
+
+    user = await _resolve_user(args[1])
+    if not user:
+        await message.answer("User not found.")
+        return
+    if not user.exness_uid:
+        await message.answer("That user has no Exness ID on file — nothing to re-check.")
+        return
+
+    await message.answer(f"🔁 Re-checking @{user.username or '—'} ({user.telegram_id})…")
+    # Imported lazily to avoid a circular import at module load time.
+    from scheduler import recheck_one_user
+
+    try:
+        result = await recheck_one_user(bot, user)
+    except Exception as e:
+        await message.answer(f"Re-check failed: {e}")
+        return
+
+    fresh = await User.filter(id=user.id).first()
+    await message.answer(
+        f"Done. Result: {result}\nNew status: {fresh.status if fresh else '?'}"
+    )
 
 
 # ---------------------------------------------------------------------------

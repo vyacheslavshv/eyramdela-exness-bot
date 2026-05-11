@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Iterable
 
@@ -216,6 +216,181 @@ async def check_pending_users(bot: Bot) -> None:
 # ---------------------------------------------------------------------------
 # Job 2 — recheck verified / warned users
 # ---------------------------------------------------------------------------
+async def recheck_one_user(bot: Bot, user: User, now: datetime | None = None) -> str:
+    """Re-verify a single verified/warned user and apply the result
+    (kick / warn / restore / refresh snapshot). Returns a short status
+    string for logging / the admin /recheck command.
+
+    Used both by the periodic `recheck_verified_users` loop and by the
+    admin `/recheck` command (so the operator can test the kick path
+    without waiting for the scheduler).
+    """
+    if now is None:
+        now = utcnow()
+
+    try:
+        snap = await fetch_snapshot(user.exness_uid)
+    except Exception as e:
+        logger.error(f"fetch_snapshot crashed for {user.telegram_id}: {e}")
+        snap = None
+
+    if snap is None:
+        await _record_api_error(user)
+        return "api_error (no action)"
+
+    # ---- partner change / left ----
+    if not snap.under_partner or snap.client_status in ("LEFT", "CHANGING"):
+        reason = (
+            "not_under_partner" if not snap.under_partner
+            else f"client_status={snap.client_status}"
+        )
+        await _kick_from_channel(bot, user.telegram_id)
+        await _mark_kicked(user, "kicked_partner_changed", reason)
+        await _safe_send(
+            bot, user.telegram_id,
+            "❌ You've been removed from the VIP channel.\n\n"
+            "Reason: your Exness account is no longer registered under our partner. "
+            "If this is a mistake, please re-verify from /start.",
+        )
+        await _admin_notify(
+            bot,
+            f"🚪 Kicked @{user.username or '—'} ({user.telegram_id}) "
+            f"— partner change ({reason})",
+        )
+        return f"kicked_partner_changed ({reason})"
+
+    # ---- no longer meets the activation gate → kick ----
+    # `is_activated` requires a real first-time deposit (ftd_received,
+    # which is sticky on Exness's side once true). So this only ever
+    # catches accounts that slipped in without one — e.g. a no-deposit
+    # bonus trade — never a genuine depositor. We check regardless of
+    # client_status: an account that doesn't meet the gate shouldn't be
+    # in the channel whether Exness marks it ACTIVE or INACTIVE.
+    # (LEFT / CHANGING are already handled above.)
+    if not is_activated(snap.progress_flags, snap.deposit_total):
+        await _kick_from_channel(bot, user.telegram_id)
+        await _mark_kicked(
+            user, "kicked_not_activated",
+            f"flags={snap.progress_flags} deposit={snap.deposit_total}",
+        )
+        await _safe_send(
+            bot, user.telegram_id,
+            "❌ You've been removed from the VIP channel.\n\n"
+            f"Reason: your Exness account does not meet the activation "
+            f"requirements — a first deposit of ${int(MIN_DEPOSIT_USD)} "
+            "or more is required. Make the deposit, then re-verify from "
+            "/start to rejoin.",
+        )
+        await _admin_notify(
+            bot,
+            f"🚫 Kicked @{user.username or '—'} ({user.telegram_id}) "
+            f"— not activated (no qualifying deposit).",
+        )
+        return "kicked_not_activated"
+
+    # ---- balance ≈ 0 after a real deposit history → withdrew everything ----
+    # Trust the ftd_received flag as the truth source: numeric
+    # deposit_amount / client_balance can be the placeholder "1" that
+    # Exness returns for never-deposited accounts. Once a user has
+    # ftd_received=true, an empty balance signals a withdrawal.
+    had_deposits = "ftd_received" in (snap.progress_flags or [])
+    if had_deposits and (snap.balance or 0) < 1.0:
+        await _kick_from_channel(bot, user.telegram_id)
+        await _mark_kicked(
+            user, "kicked_zero_balance",
+            f"balance={snap.balance}, dep_total={snap.deposit_total}",
+        )
+        await _safe_send(
+            bot, user.telegram_id,
+            "❌ You've been removed from the VIP channel.\n\n"
+            "Reason: your Exness account balance is empty. "
+            "Re-fund the account and re-verify from /start to rejoin.",
+        )
+        await _admin_notify(
+            bot,
+            f"💸 Kicked @{user.username or '—'} ({user.telegram_id}) "
+            f"— zero balance.",
+        )
+        return "kicked_zero_balance"
+
+    # ---- inactivity flow ----
+    # Conservative rule: if Exness has not given us a last_trade
+    # timestamp, do NOT warn or kick on inactivity. A user who
+    # qualified by deposit-only would otherwise be kicked
+    # immediately even though they're a paying customer.
+    last_trade = snap.last_trade_at
+    days_since_trade: float | None
+    if last_trade:
+        days_since_trade = (now - last_trade).total_seconds() / 86400
+    else:
+        days_since_trade = None
+
+    # Recovery: warned → active again
+    if user.status == "warned" and days_since_trade is not None and \
+            days_since_trade < INACTIVITY_WARN_DAYS and snap.client_status == "ACTIVE":
+        await User.filter(id=user.id).update(
+            status="verified", last_warning_at=None
+        )
+        await _audit(user.telegram_id, "recovered_from_warning")
+        await _safe_send(
+            bot, user.telegram_id,
+            "✅ Welcome back — we see your account is active again.\n\n"
+            "You're all good in the VIP channel.",
+        )
+        await _persist_snapshot(user, snap)
+        return "recovered_from_warning"
+
+    # Warned + grace expired + still inactive → kick.
+    # Only kick if we have a real days_since_trade — never on
+    # missing-timestamp data.
+    if user.status == "warned" and user.last_warning_at and \
+            (now - user.last_warning_at).total_seconds() / 86400 \
+            >= WARNING_GRACE_DAYS and \
+            days_since_trade is not None and \
+            days_since_trade >= INACTIVITY_WARN_DAYS:
+        await _kick_from_channel(bot, user.telegram_id)
+        await _mark_kicked(
+            user, "kicked_inactive",
+            f"days_since_trade={days_since_trade}",
+        )
+        await _safe_send(
+            bot, user.telegram_id,
+            "❌ You've been removed from the VIP channel due to "
+            "inactivity.\n\nPlace a trade and /start the bot to rejoin.",
+        )
+        await _admin_notify(
+            bot,
+            f"😴 Kicked @{user.username or '—'} ({user.telegram_id}) "
+            f"— inactivity.",
+        )
+        return "kicked_inactive"
+
+    # Verified + just crossed the warn threshold → send heads-up
+    if user.status == "verified" and days_since_trade is not None and \
+            days_since_trade >= INACTIVITY_WARN_DAYS:
+        await User.filter(id=user.id).update(
+            status="warned", last_warning_at=now
+        )
+        await _audit(
+            user.telegram_id, "warning_sent",
+            f"days_since_trade={days_since_trade:.1f}",
+        )
+        await _safe_send(
+            bot, user.telegram_id,
+            "⚠️ Heads up — inactivity detected\n\n"
+            f"We haven't seen any trading activity on your Exness account "
+            f"for ~{int(days_since_trade)} days. To stay in the VIP "
+            f"channel, place at least one trade in the next "
+            f"{WARNING_GRACE_DAYS} day(s), or we'll have to remove you.\n\n"
+            "Re-joining is easy — just /start the bot again after you trade.",
+        )
+        await _persist_snapshot(user, snap)
+        return "warning_sent"
+
+    await _persist_snapshot(user, snap)
+    return "ok (still verified)"
+
+
 async def recheck_verified_users(bot: Bot) -> None:
     rows = await User.filter(
         status__in=["verified", "warned"], exness_uid__not_isnull=True
@@ -223,144 +398,12 @@ async def recheck_verified_users(bot: Bot) -> None:
     if not rows:
         return
     logger.debug(f"scheduler: re-checking {len(rows)} verified/warned user(s)")
-
     now = utcnow()
-
     for user in rows:
         try:
-            snap = await fetch_snapshot(user.exness_uid)
+            await recheck_one_user(bot, user, now)
         except Exception as e:
-            logger.error(f"fetch_snapshot crashed for {user.telegram_id}: {e}")
-            snap = None
-
-        if snap is None:
-            await _record_api_error(user)
-            await asyncio.sleep(_PER_REQUEST_DELAY)
-            continue
-
-        # ---- partner change / left ----
-        if not snap.under_partner or snap.client_status in ("LEFT", "CHANGING"):
-            reason = (
-                "not_under_partner" if not snap.under_partner
-                else f"client_status={snap.client_status}"
-            )
-            await _kick_from_channel(bot, user.telegram_id)
-            await _mark_kicked(user, "kicked_partner_changed", reason)
-            await _safe_send(
-                bot, user.telegram_id,
-                "❌ You've been removed from the VIP channel.\n\n"
-                "Reason: your Exness account is no longer registered under our partner. "
-                "If this is a mistake, please re-verify from /start.",
-            )
-            await _admin_notify(
-                bot,
-                f"🚪 Kicked @{user.username or '—'} ({user.telegram_id}) "
-                f"— partner change ({reason})",
-            )
-            await asyncio.sleep(_PER_REQUEST_DELAY)
-            continue
-
-        # ---- balance ≈ 0 after a real deposit history → withdrew everything ----
-        # Trust the ftd_received flag as the truth source: numeric
-        # deposit_amount / client_balance can be the placeholder "1" that
-        # Exness returns for never-deposited accounts. Once a user has
-        # ftd_received=true, an empty balance signals a withdrawal.
-        had_deposits = "ftd_received" in (snap.progress_flags or [])
-        if had_deposits and (snap.balance or 0) < 1.0:
-            await _kick_from_channel(bot, user.telegram_id)
-            await _mark_kicked(
-                user, "kicked_zero_balance",
-                f"balance={snap.balance}, dep_total={snap.deposit_total}",
-            )
-            await _safe_send(
-                bot, user.telegram_id,
-                "❌ You've been removed from the VIP channel.\n\n"
-                "Reason: your Exness account balance is empty. "
-                "Re-fund the account and re-verify from /start to rejoin.",
-            )
-            await _admin_notify(
-                bot,
-                f"💸 Kicked @{user.username or '—'} ({user.telegram_id}) "
-                f"— zero balance.",
-            )
-            await asyncio.sleep(_PER_REQUEST_DELAY)
-            continue
-
-        # ---- inactivity flow ----
-        # Conservative rule: if Exness has not given us a last_trade
-        # timestamp, do NOT warn or kick on inactivity. A user who
-        # qualified by deposit-only would otherwise be kicked
-        # immediately even though they're a paying customer.
-        last_trade = snap.last_trade_at
-        days_since_trade: float | None
-        if last_trade:
-            days_since_trade = (now - last_trade).total_seconds() / 86400
-        else:
-            days_since_trade = None
-
-        # Recovery: warned → active again
-        if user.status == "warned" and days_since_trade is not None and \
-                days_since_trade < INACTIVITY_WARN_DAYS and snap.client_status == "ACTIVE":
-            await User.filter(id=user.id).update(
-                status="verified", last_warning_at=None
-            )
-            await _audit(user.telegram_id, "recovered_from_warning")
-            await _safe_send(
-                bot, user.telegram_id,
-                "✅ Welcome back — we see your account is active again.\n\n"
-                "You're all good in the VIP channel.",
-            )
-            await _persist_snapshot(user, snap)
-            await asyncio.sleep(_PER_REQUEST_DELAY)
-            continue
-
-        # Warned + grace expired + still inactive → kick.
-        # Only kick if we have a real days_since_trade — never on
-        # missing-timestamp data.
-        if user.status == "warned" and user.last_warning_at and \
-                (now - user.last_warning_at).total_seconds() / 86400 \
-                >= WARNING_GRACE_DAYS and \
-                days_since_trade is not None and \
-                days_since_trade >= INACTIVITY_WARN_DAYS:
-            await _kick_from_channel(bot, user.telegram_id)
-            await _mark_kicked(
-                user, "kicked_inactive",
-                f"days_since_trade={days_since_trade}",
-            )
-            await _safe_send(
-                bot, user.telegram_id,
-                "❌ You've been removed from the VIP channel due to "
-                "inactivity.\n\nPlace a trade and /start the bot to rejoin.",
-            )
-            await _admin_notify(
-                bot,
-                f"😴 Kicked @{user.username or '—'} ({user.telegram_id}) "
-                f"— inactivity.",
-            )
-            await asyncio.sleep(_PER_REQUEST_DELAY)
-            continue
-
-        # Verified + just crossed the warn threshold → send heads-up
-        if user.status == "verified" and days_since_trade is not None and \
-                days_since_trade >= INACTIVITY_WARN_DAYS:
-            await User.filter(id=user.id).update(
-                status="warned", last_warning_at=now
-            )
-            await _audit(
-                user.telegram_id, "warning_sent",
-                f"days_since_trade={days_since_trade:.1f}",
-            )
-            await _safe_send(
-                bot, user.telegram_id,
-                "⚠️ Heads up — inactivity detected\n\n"
-                f"We haven't seen any trading activity on your Exness account "
-                f"for ~{int(days_since_trade)} days. To stay in the VIP "
-                f"channel, place at least one trade in the next "
-                f"{WARNING_GRACE_DAYS} day(s), or we'll have to remove you.\n\n"
-                "Re-joining is easy — just /start the bot again after you trade.",
-            )
-
-        await _persist_snapshot(user, snap)
+            logger.error(f"recheck_one_user crashed for {user.telegram_id}: {e}")
         await asyncio.sleep(_PER_REQUEST_DELAY)
 
 

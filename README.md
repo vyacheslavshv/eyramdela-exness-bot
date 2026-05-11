@@ -42,12 +42,13 @@ auto-removed.
    * **Not connected under your partner** → "❌ Your account is
      currently not connected under our partner link" + buttons:
      🔀 Switch Partner, ✏️ I entered the wrong ID, 📊 Check My Status.
-   * **Connected but not activated** → "🟡 Almost there!" — deposit
-     ≥ `$MIN_DEPOSIT_USD` or place a trade, with direct deep links to
-     **💵 Make a Deposit** and **📈 Open Exness (Trade)**. The bot
-     auto-checks every `PENDING_POLL_MINUTES` for the next
-     `PENDING_AUTO_GIVEUP_HOURS` hours; after that, the user taps
-     **🔁 Re-check now** to resume.
+   * **Connected but not activated** → "🟡 Almost there!" — a first
+     deposit of ≥ `$MIN_DEPOSIT_USD` is required (a no-deposit bonus
+     trade does *not* count); if `ACTIVATION_REQUIRE_TRADE=true` a
+     trade is also required. Direct deep links to **💵 Make a Deposit**
+     and **📈 Open Exness (Trade)**. The bot auto-checks every
+     `PENDING_POLL_MINUTES` for the next `PENDING_AUTO_GIVEUP_HOURS`
+     hours; after that, the user taps **🔁 Re-check now** to resume.
    * **Activated** → "🎉 Congratulations! ✅ VIP Access Approved" + a
      single-use channel invite link that expires in 24 hours. The bot
      auto-approves the join request. A **🔗 Get Invite Link Again**
@@ -65,6 +66,12 @@ Every `RECHECK_INTERVAL_HOURS`, the bot re-verifies every active member:
 
 * **Partner change** / `LEFT` / `CHANGING` / no longer in your client
   list → kicked immediately with a DM explaining why.
+* **No qualifying deposit** — account is still under the partner and
+  `ACTIVE` but doesn't meet the activation gate (no first deposit ≥
+  `$MIN_DEPOSIT_USD`) → kicked. The `ftd_received` flag is sticky on
+  Exness's side once true, so this only ever catches accounts that got
+  in without a real deposit (e.g. a no-deposit bonus trade), never a
+  genuine depositor.
 * **Inactivity** past `INACTIVITY_WARN_DAYS` (no trades) → warned via
   DM. If still inactive after `WARNING_GRACE_DAYS`, kicked. If they
   trade again before the kick, automatically restored. (Users who
@@ -126,7 +133,8 @@ sudo ./deploy.sh
 | `EXNESS_PARTNER_CODE` | Your partner code (e.g. `gxzo6189vp`). Shown to users who already have an Exness account so they can ask Exness Live Chat to switch their partner code to yours. |
 | `EXNESS_DEPOSIT_URL` | Deep link to the Exness deposit page. Default `https://my.exness.com/pa/payments-and-wallet/deposit`. Override only if Exness changes the URL. |
 | `EXNESS_PA_URL` | Deep link to the Exness Personal Area (used as the "Open Exness (Trade)" button on the pending screen). Default `https://my.exness.com/pa/`. |
-| `MIN_DEPOSIT_USD` | Activation threshold (default `50`) |
+| `MIN_DEPOSIT_USD` | First-deposit threshold required to activate (default `50`). A deposit at or above this is always mandatory — a no-deposit bonus trade does not count. |
+| `ACTIVATION_REQUIRE_TRADE` | `true` = also require the user to have placed a first trade (on top of the deposit). Default `false`. |
 | `INACTIVITY_WARN_DAYS` | DM a warning after this many days idle (default `11`) |
 | `INACTIVITY_KICK_DAYS` | Kick threshold for hard inactivity (default `14`) |
 | `WARNING_GRACE_DAYS` | After warning, wait this many days before kick (default `3`) |
@@ -171,6 +179,7 @@ Send these in a DM to the bot from any account listed in `ADMIN_IDS`.
 | `/stats` | Counts per status + audit events today + live channel member count |
 | `/user <telegram_id>` *or* `/user <email>` *or* `/user <UID>` | Full info dump for one user |
 | `/check <UID>` | Manual Exness API check, raw JSON output for debugging |
+| `/recheck <telegram_id\|email\|UID>` | Force a re-verification of one user right now — same logic the scheduler runs every `RECHECK_INTERVAL_HOURS`, including the kick path. Use this to test that auto-removal works. |
 | `/kick <telegram_id>` | Manually kick + log |
 | `/unflag <telegram_id>` | Restore a kicked/warned user back to verified |
 | `/users [status] [page]` | Paginated list by status (`onboarding`, `pending`, `verified`, `warned`, `kicked`) |

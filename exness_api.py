@@ -45,6 +45,7 @@ import aiohttp
 from loguru import logger
 
 from config import (
+    ACTIVATION_REQUIRE_TRADE,
     EXNESS_BASE_URL,
     EXNESS_LOGIN,
     EXNESS_PASSWORD,
@@ -571,11 +572,27 @@ async def fetch_snapshot(uid: str) -> Optional[ClientSnapshot]:
 # ---------------------------------------------------------------------------
 # Activation gate
 # ---------------------------------------------------------------------------
-def is_activated(progress_flags: list[str], deposit_total_usd: float) -> bool:
-    """Either ``ftt_made`` OR (``ftd_received`` AND deposit ≥ MIN)."""
+def is_activated(progress_flags: list[str], deposit_total_usd: float,
+                 *, require_trade: bool | None = None) -> bool:
+    """A real first-time deposit of at least MIN_DEPOSIT_USD is mandatory.
+
+    The bare ``ftt_made`` path is intentionally gone: a no-deposit bonus
+    trade (which sets ftt_made without ftd_received) used to grant VIP
+    access, which is exactly what we don't want. If ACTIVATION_REQUIRE_TRADE
+    is on, a first trade is *also* required on top of the deposit.
+
+    ``ftd_received`` is a sticky flag on the Exness side — once true it
+    stays true even after a withdrawal — so a real depositor never trips
+    this check during re-verification.
+    """
+    if require_trade is None:
+        require_trade = ACTIVATION_REQUIRE_TRADE
     flags = set(progress_flags or [])
-    has_first_trade = "ftt_made" in flags
     has_qualifying_deposit = (
         "ftd_received" in flags and (deposit_total_usd or 0) >= MIN_DEPOSIT_USD
     )
-    return has_first_trade or has_qualifying_deposit
+    if not has_qualifying_deposit:
+        return False
+    if require_trade:
+        return "ftt_made" in flags
+    return True
