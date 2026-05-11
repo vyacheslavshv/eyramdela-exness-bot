@@ -133,7 +133,7 @@ sudo ./deploy.sh
 | `RECHECK_INTERVAL_HOURS` | How often to re-check each verified user (default `6`) |
 | `PENDING_POLL_MINUTES` | How often to re-check pending users (default `5`) |
 | `PENDING_AUTO_GIVEUP_HOURS` | After this many hours in pending without activation, the bot stops auto-checking. The user can resume by tapping **Re-check now** or sending `/start` again — that resets the window. Default `24`. |
-| `BRAND_NAME` | Shown in welcome message (default `VIP Signals`) |
+| `BRAND_NAME` | Your community name. Appears in the welcome message and in the "How to Switch to {BRAND_NAME} on Exness" instructions. Default `VIP Signals` — **set this to your real name.** |
 | `DISPLAY_TZ` | IANA tz for admin output (default `UTC`). Internal storage is always UTC |
 | `TEST_MODE` | `true` bypasses Exness API for local dev — every UID is accepted as activated. Useful for end-to-end Telegram testing without real referrals. **Always set back to `false` before handing the bot over to real users.** |
 | `DATABASE_URL` | `sqlite://data/db.sqlite3` (default) |
@@ -143,13 +143,20 @@ sudo ./deploy.sh
 ## Channel setup
 
 1. Create a private Telegram **channel** (not a group).
-2. Add the bot as **admin** with these permissions:
-   * **Add subscribers** *(needed to generate one-time invite links)*
-   * **Ban users**
-   * **Post messages** *(only needed for `/broadcast_channel`)*
-3. Set the channel join mode to **"Approval required"**. The bot
-   intercepts join requests and approves only verified users.
-4. Put the channel's numeric ID into `CHANNEL_ID` in `.env`.
+2. Add the bot as **admin** with these rights enabled:
+   * **Add Subscribers / Invite Users via Link** — lets the bot mint
+     the per-user single-use invite links.
+   * **Ban Users** — used to remove members who lose eligibility
+     (the bot bans then immediately un-bans, so they can re-join later
+     if they re-qualify).
+   * **Post Messages** — only needed if you use `/broadcast_channel`.
+3. Set the channel's join mode so that joining via invite link
+   requires approval ("Approval to join" / "Request admin approval").
+   The bot intercepts join requests and approves only verified users;
+   everyone else is declined.
+4. Put the channel's numeric ID (starts with `-100…`) into `CHANNEL_ID`
+   in `.env`. Easiest way to get it: forward any channel post to
+   @userinfobot.
 
 ---
 
@@ -200,7 +207,7 @@ Fiverr order so the chat history stays in one place.
 ├── models.py                # User / RelayMessage / AuditLog (tortoise-orm)
 ├── scheduler.py             # pending poll / recheck / daily cleanup
 ├── handlers/
-│   ├── commands.py          # /start, FSM (phone → UID), main-menu callbacks
+│   ├── commands.py          # /start, the Join-VIP funnel (email → phone → UID), main-menu callbacks
 │   ├── admin.py             # admin-only commands
 │   ├── channel.py           # chat_join_request, my_chat_member
 │   └── relay.py             # DM relay
@@ -237,9 +244,10 @@ Verify (a) the bot is a channel admin with the permissions listed above,
 (c) the channel uses **Approval required** join mode.
 
 **Invite link doesn't work / expired.**
-Links are single-use and expire in 24h. Ask the user to send `/start`
-again; if their status is still `verified`, the bot generates a fresh
-link.
+Links are single-use and expire in 24h. The user can tap
+**🔗 Get Invite Link Again** (shown on the success screen, on
+`/start`, and under `📊 Check Status` while they're verified) to mint a
+fresh one.
 
 **A user complains they were kicked but their account is fine.**
 Check `/audit <telegram_id>` for the reason. Transient API errors do
