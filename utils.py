@@ -122,6 +122,19 @@ async def init_db() -> None:
         except Exception:
             pass
 
+    # Indexes on columns added above (CREATE INDEX IF NOT EXISTS is a no-op
+    # when the index already exists from a fresh generate_schemas / aerich run).
+    extra_indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)",
+        "CREATE INDEX IF NOT EXISTS idx_users_exness_uid ON users (exness_uid)",
+        "CREATE INDEX IF NOT EXISTS idx_users_status ON users (status)",
+    ]
+    for stmt in extra_indexes:
+        try:
+            await conn.execute_query(stmt)
+        except Exception:
+            pass
+
 
 async def close_db() -> None:
     await Tortoise.close_connections()
