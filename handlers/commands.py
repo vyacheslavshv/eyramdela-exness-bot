@@ -1,4 +1,5 @@
-"""User-facing /start, FSM verify flow, callbacks."""
+"""User-facing /start, the Join-VIP funnel (email → phone → Exness ID),
+and all main-menu callbacks. Layout follows the client's spec sheet."""
 
 from __future__ import annotations
 
@@ -36,66 +37,67 @@ from config import (
 )
 from exness_api import fetch_snapshot, is_activated
 from models import AuditLog, User
-from utils import normalize_phone, utcnow
+from utils import normalize_email, normalize_phone, utcnow
 
 router = Router()
 
 
 # ---------------------------------------------------------------------------
-# FSM states for the verify funnel
+# FSM states — the Join-VIP funnel collects email → phone → Exness ID.
 # ---------------------------------------------------------------------------
 class VerifyState(StatesGroup):
+    awaiting_email = State()
     awaiting_phone = State()
     awaiting_uid = State()
 
 
 # ---------------------------------------------------------------------------
+# Small helpers used to interpolate the client's templated copy.
+# ---------------------------------------------------------------------------
+def _partner_link_line() -> str:
+    return EXNESS_REFERRAL_LINK or "(partner link — ask the admin)"
+
+
+def _partner_code_html() -> str:
+    if EXNESS_PARTNER_CODE:
+        return f"<code>{html.escape(EXNESS_PARTNER_CODE)}</code> (tap to copy)"
+    return "(ask the admin for the partner code)"
+
+
+# ---------------------------------------------------------------------------
 # Keyboards
 # ---------------------------------------------------------------------------
-def kb_main_menu(has_uid: bool = False) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="🚀 Get Free VIP Access", callback_data="start_verify")],
-        [InlineKeyboardButton(text="ℹ️ How It Works", callback_data="how_it_works")],
-        [InlineKeyboardButton(text="📊 Check My Status", callback_data="my_status")],
-    ]
-    if has_uid:
-        rows.append([
-            InlineKeyboardButton(text="✏️ Change Exness ID", callback_data="edit_uid")
-        ])
-    if EXNESS_REFERRAL_LINK:
-        rows.append([
-            InlineKeyboardButton(text="🟢 Register on Exness", url=EXNESS_REFERRAL_LINK)
-        ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def kb_back_to_menu() -> InlineKeyboardMarkup:
+def kb_main_menu() -> InlineKeyboardMarkup:
+    """Exact button order requested by the client:
+    How It Works → Register on Exness → Join VIP for Free → Check Status."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Get Free VIP Access", callback_data="start_verify")],
-        [InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_to_menu")],
+        [InlineKeyboardButton(text="📖 How It Works", callback_data="how_it_works")],
+        [InlineKeyboardButton(text="🟢 Register on Exness", callback_data="register_exness")],
+        [InlineKeyboardButton(text="🚀 Join VIP for Free", callback_data="join_vip")],
+        [InlineKeyboardButton(text="📊 Check Status", callback_data="check_status")],
     ])
 
 
-def kb_phone_request() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Share my phone", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-        input_field_placeholder="Tap the button to share your phone",
-    )
+def kb_back_to_menu(extra_join: bool = True) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if extra_join:
+        rows.append([
+            InlineKeyboardButton(text="🚀 Join VIP for Free", callback_data="join_vip")
+        ])
+    rows.append([
+        InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_to_menu")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def kb_register_or_recheck() -> InlineKeyboardMarkup:
+def kb_register_screen() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if EXNESS_REFERRAL_LINK:
         rows.append([
             InlineKeyboardButton(text="🟢 Register on Exness", url=EXNESS_REFERRAL_LINK)
         ])
     rows.append([
-        InlineKeyboardButton(text="🔁 I already registered, re-check", callback_data="start_verify")
-    ])
-    rows.append([
-        InlineKeyboardButton(text="✏️ Use a different ID", callback_data="edit_uid")
+        InlineKeyboardButton(text="🚀 Join VIP for Free", callback_data="join_vip")
     ])
     rows.append([
         InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_to_menu")
@@ -103,10 +105,58 @@ def kb_register_or_recheck() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def kb_join_vip_choice() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Yes, My Account Is Under You", callback_data="acc_under")],
+        [InlineKeyboardButton(text="❌ My Account Is NOT Under You", callback_data="acc_not_under")],
+        [InlineKeyboardButton(text="📊 Check My Status", callback_data="check_status")],
+        [InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_to_menu")],
+    ])
+
+
+def kb_switch_partner() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if EXNESS_REFERRAL_LINK:
+        rows.append([
+            InlineKeyboardButton(text="🟢 Open Partner Link", url=EXNESS_REFERRAL_LINK)
+        ])
+    rows.append([
+        InlineKeyboardButton(text="📊 Check My Status", callback_data="check_status")
+    ])
+    rows.append([
+        InlineKeyboardButton(text="🆕 Create New Exness Account", callback_data="create_new_exness")
+    ])
+    rows.append([
+        InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_to_menu")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_create_new() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if EXNESS_REFERRAL_LINK:
+        rows.append([
+            InlineKeyboardButton(text="🟢 Open Partner Link", url=EXNESS_REFERRAL_LINK)
+        ])
+    rows.append([
+        InlineKeyboardButton(text="📊 Check My Status", callback_data="check_status")
+    ])
+    rows.append([
+        InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_to_menu")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_not_connected() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔀 Switch Partner", callback_data="acc_not_under")],
+        [InlineKeyboardButton(text="✏️ I entered the wrong ID", callback_data="edit_uid")],
+        [InlineKeyboardButton(text="📊 Check My Status", callback_data="check_status")],
+        [InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_to_menu")],
+    ])
+
+
 def kb_pending_help() -> InlineKeyboardMarkup:
-    """Pending state: user is registered under our partner but not yet
-    activated. Show shortcuts to do exactly that — deposit or trade —
-    not back to registration."""
     rows: list[list[InlineKeyboardButton]] = []
     if EXNESS_DEPOSIT_URL:
         rows.append([
@@ -120,24 +170,8 @@ def kb_pending_help() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔁 Re-check now", callback_data="recheck_pending")
     ])
     rows.append([
-        InlineKeyboardButton(text="📊 My Status", callback_data="my_status")
+        InlineKeyboardButton(text="✏️ I entered the wrong ID", callback_data="edit_uid")
     ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def kb_status(has_uid: bool) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    if has_uid:
-        rows.append([
-            InlineKeyboardButton(text="🔁 Re-check now", callback_data="recheck_pending")
-        ])
-        rows.append([
-            InlineKeyboardButton(text="✏️ Change Exness ID", callback_data="edit_uid")
-        ])
-    else:
-        rows.append([
-            InlineKeyboardButton(text="🚀 Get Free VIP Access", callback_data="start_verify")
-        ])
     rows.append([
         InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_to_menu")
     ])
@@ -151,9 +185,28 @@ def kb_verified(invite_link: str | None) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🚀 Open VIP Channel", url=invite_link)
         ])
     rows.append([
-        InlineKeyboardButton(text="📊 My Status", callback_data="my_status")
+        InlineKeyboardButton(text="🔗 Get Invite Link Again", callback_data="new_invite")
+    ])
+    rows.append([
+        InlineKeyboardButton(text="📊 Check My Status", callback_data="check_status")
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_status_no_uid() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Join VIP for Free", callback_data="join_vip")],
+        [InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_to_menu")],
+    ])
+
+
+def kb_phone_request() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Share my phone", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        input_field_placeholder="Tap the button to share your phone",
+    )
 
 
 def kb_cancel() -> InlineKeyboardMarkup:
@@ -166,6 +219,7 @@ def kb_cancel() -> InlineKeyboardMarkup:
 # Copy
 # ---------------------------------------------------------------------------
 def welcome_text(first_name: str | None) -> str:
+    # "Keep the current welcome message exactly the same."
     name = first_name or "there"
     return (
         f"👋 Welcome to {BRAND_NAME}, {name}!\n\n"
@@ -177,45 +231,125 @@ def welcome_text(first_name: str | None) -> str:
 
 
 HOW_IT_WORKS_TEXT = (
-    "ℹ️ How It Works\n\n"
-    "1. Share your phone number.\n"
-    "2. Send your Exness account ID.\n"
-    "3. We'll check that your account is registered under our partner.\n"
-    f"4. Make your first trade OR a deposit ≥ ${int(MIN_DEPOSIT_USD)} to activate.\n"
-    "5. Get an invite link to the VIP channel — instantly.\n\n"
-    "We re-check your account periodically. As long as it stays under our "
-    "partner and you keep trading, you keep your VIP access."
+    "🔥 HOW IT WORKS\n\n"
+    "1️⃣ Share your email address\n"
+    "2️⃣ Share your phone number\n"
+    "3️⃣ Share your Exness ID (Trading Account Number)\n"
+    "4️⃣ Place a trade to activate your account. Inactive or empty "
+    "accounts will not get access.\n"
+    f"💰 Minimum deposit required: ${int(MIN_DEPOSIT_USD)}\n"
+    "5️⃣ Once verified, you'll receive your VIP invite link.\n\n"
+    "⚠️ Important:\n"
+    "We periodically recheck all accounts. As long as your account "
+    "remains connected under our partner link, you'll continue "
+    "enjoying VIP access and all community benefits.\n\n"
+    "💎 Stay loyal & stay profitable."
 )
 
+
+def register_text() -> str:
+    return (
+        "📝 Create Your Exness Account\n\n"
+        "To join our VIP community for FREE, register using our official "
+        "partner link below:\n\n"
+        f"👉 {_partner_link_line()}\n\n"
+        "After registration, return here and tap \"Join VIP for Free\"."
+    )
+
+
+JOIN_VIP_CHOICE_TEXT = "❓ Do you already have an Exness account?"
+
+
+def switch_partner_text() -> str:
+    return (
+        f"🔥 How to Switch to {BRAND_NAME} on Exness\n\n"
+        "Follow these steps carefully to join for FREE:\n\n"
+        "1️⃣ Log in to your Exness account.\n\n"
+        "2️⃣ Open Live Chat and type:\n"
+        "“Change Partner”\n\n"
+        "3️⃣ When asked for the purpose, select:\n"
+        "Signals / Education\n\n"
+        "4️⃣ Fill out the form using our partner link below:\n"
+        f"👉 {_partner_link_line()}\n\n"
+        "5️⃣ Wait for the approval email before taking any further action.\n\n"
+        "6️⃣ AFTER APPROVAL, create a NEW Real MT4/MT5 trading account.\n\n"
+        "7️⃣ Transfer your funds from the old trading account (if any) to "
+        "the new one, then archive the old account.\n\n"
+        "⚠️ Important:\n"
+        "Your old account number may still remain under your previous "
+        "partner until funds are moved into the newly created trading "
+        "account. This is why creating a new account after approval is "
+        "very important.\n\n"
+        "✅ Once completed, return here and tap “Check My Status” for "
+        "verification."
+    )
+
+
+def create_new_text() -> str:
+    return (
+        "🆕 Your account is currently not eligible for partner transfer.\n\n"
+        "No worries — you can still join the VIP community by creating a "
+        "NEW Exness account under our partner link.\n\n"
+        "Exness allows you to create another account using:\n"
+        "• The same personal details\n"
+        "• The same identity verification\n"
+        "• The same phone number\n\n"
+        "⚠️ The only requirement: use a different email address during "
+        "registration.\n\n"
+        "STEPS TO FOLLOW\n\n"
+        "1️⃣ Create a NEW Exness account using our partner link below:\n"
+        f"👉 {_partner_link_line()}\n"
+        f"   …or use Partner Code: {_partner_code_html()}\n\n"
+        "2️⃣ Register using a different email address\n"
+        "3️⃣ Complete verification\n"
+        "4️⃣ Create a Real MT4/MT5 trading account\n"
+        f"5️⃣ Deposit and place at least one trade to activate the account\n"
+        "6️⃣ Return here and tap “Check My Status”\n\n"
+        "Once verified, your VIP access will be approved automatically and "
+        "you'll receive the invite link.\n\n"
+        "🎉 Welcome to the community."
+    )
+
+
+EMAIL_PROMPT_TEXT = (
+    "📧 Please enter the email address used for your Exness account."
+)
+
+PHONE_PROMPT_TEXT = "📱 Now share your phone number using the button below."
 
 WHERE_TO_FIND_UID = (
-    "📍 Where to find your Exness account ID:\n\n"
-    "• Web — sign in at my.exness.com → \"My Accounts\" tab. "
-    "Each trading account has an 8-9 digit number next to it "
-    "(e.g. 12345678).\n"
-    "• Mobile app — open the app → tap your account → the number "
-    "shown above the balance is your ID.\n\n"
-    "Either the trading account number (digits) or the full Client "
-    "UUID will work. It's never your email, password, or partner code."
+    "📍 Where to find it:\n"
+    "• Web — sign in at my.exness.com → “My Accounts”. Each trading "
+    "account shows an 8-9 digit number (e.g. 12345678).\n"
+    "• Mobile app — open the app → tap your account → the number above "
+    "the balance.\n\n"
+    "Send just the digits — not your email, password, or partner code."
 )
 
-
 UID_PROMPT_TEXT = (
-    "🔑 Send me your Exness account ID (the trading account number "
-    "you see in your Exness dashboard, e.g. 12345678).\n\n"
+    "🔑 Now send your Exness ID (Trading Account Number).\n\n"
     + WHERE_TO_FIND_UID
 )
 
+VERIFY_DELAY_TEXT = (
+    "⏳ Verification can take a few minutes depending on Exness processing "
+    "time. Please be patient while we confirm your account status."
+)
+
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Generic helpers
 # ---------------------------------------------------------------------------
 async def _safe_edit(callback: CallbackQuery, text: str,
-                     reply_markup: InlineKeyboardMarkup | None = None) -> None:
+                     reply_markup: InlineKeyboardMarkup | None = None,
+                     parse_mode: str | None = None) -> None:
     try:
-        await callback.message.edit_text(text, reply_markup=reply_markup)
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception:
-        await callback.message.answer(text, reply_markup=reply_markup)
+        try:
+            await callback.message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except Exception as e:
+            logger.warning(f"_safe_edit fallback failed: {e}")
 
 
 async def _audit(telegram_id: int, event: str, detail: str | None = None) -> None:
@@ -225,11 +359,23 @@ async def _audit(telegram_id: int, event: str, detail: str | None = None) -> Non
         logger.warning(f"audit log write failed: {e}")
 
 
-async def _kb_main_menu_for(telegram_id: int) -> InlineKeyboardMarkup:
-    """Build the main menu with the 'Change Exness ID' button shown only
-    if the user already has a UID on file."""
-    user = await User.filter(telegram_id=telegram_id).first()
-    return kb_main_menu(has_uid=bool(user and user.exness_uid))
+async def _ensure_user(tg) -> User:
+    """Fetch (or create) the User row for a Telegram user, refreshing the
+    cached profile fields. Guards against funnels looping forever if the
+    user somehow reached a callback/FSM step without ever sending /start."""
+    user, _ = await User.get_or_create(
+        telegram_id=tg.id,
+        defaults={
+            "username": tg.username,
+            "first_name": tg.first_name,
+            "status": "onboarding",
+        },
+    )
+    if user.username != tg.username or user.first_name != tg.first_name:
+        user.username = tg.username
+        user.first_name = tg.first_name
+        await user.save()
+    return user
 
 
 async def _generate_invite(bot: Bot, telegram_id: int) -> str | None:
@@ -256,7 +402,6 @@ def _serialize_flags(flags: list[str]) -> str:
 
 
 async def _persist_snapshot(user: User, snapshot) -> None:
-    """Write the latest API snapshot back into the User row."""
     user.last_check_at = utcnow()
     user.last_client_status = snapshot.client_status
     user.last_progress_flags = _serialize_flags(snapshot.progress_flags)
@@ -267,9 +412,6 @@ async def _persist_snapshot(user: User, snapshot) -> None:
     user.last_trade_at = snapshot.last_trade_at
     user.consecutive_api_errors = 0
 
-    # Once we know the canonical UUID, persist it so future re-checks
-    # skip the full accounts scan. Skip the upgrade if it would clash
-    # with another user's stored UUID.
     canonical = getattr(snapshot, "client_uid", None)
     if canonical and user.exness_uid != canonical:
         clash = await User.filter(exness_uid=canonical).exclude(id=user.id).first()
@@ -286,7 +428,7 @@ async def _record_api_error(user: User) -> None:
 
 
 async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
-    """Run a verification pass for this user and reply with the right copy."""
+    """Run one verification pass and reply with the matching screen."""
     snapshot = await fetch_snapshot(user.exness_uid)
 
     if snapshot is None:
@@ -304,22 +446,12 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
             "last_client_status": None,
         }).save()
         await _audit(user.telegram_id, "not_under_partner", f"uid={user.exness_uid}")
-        if EXNESS_PARTNER_CODE:
-            code_block = f"<code>{html.escape(EXNESS_PARTNER_CODE)}</code> (tap to copy)"
-        else:
-            code_block = "(ask the admin for the partner code)"
         await message.answer(
-            "❌ This Exness account is not registered under our partner yet.\n\n"
-            "How to fix this:\n"
-            "• If you don't have an Exness account yet — tap the green "
-            "button below to register through our partner link.\n"
-            "• If you already have an account — open Exness Live Chat "
-            "(inside your Exness profile) and ask support to change your "
-            "partner code. They'll need our partner code:\n\n"
-            f"{code_block}\n\n"
-            "Once it's done, tap \"I already registered, re-check\" below.",
-            reply_markup=kb_register_or_recheck(),
-            parse_mode="HTML",
+            "❌ Your account is currently not connected under our partner "
+            "link.\n\n"
+            "To access the VIP community, complete the partner switch "
+            "process first — or, if you mistyped, fix your Exness ID.",
+            reply_markup=kb_not_connected(),
         )
         return
 
@@ -335,20 +467,21 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
         await _audit(user.telegram_id, "verified", f"uid={user.exness_uid}")
         if invite:
             await message.answer(
-                "✅ You're verified!\n\n"
-                "Welcome to the VIP. Here's your private invite link "
-                "(single-use, expires in 24h):\n\n"
+                "🎉 Congratulations!\n\n"
+                "✅ VIP Access Approved\n\n"
                 f"{invite}\n\n"
-                "Trade well. We'll re-check your status periodically and "
-                "you'll stay in as long as your account is active under "
-                "our partnership.",
+                "This invite link is single-use and expires in 24 hours. "
+                "We re-check accounts periodically — stay under our partner "
+                "link and you keep your access.\n\n"
+                "Welcome to the community. 💎",
                 reply_markup=kb_verified(invite),
             )
         else:
             await message.answer(
-                "✅ You're verified!\n\n"
-                "Could not auto-generate an invite link — please contact "
-                "the admin so they can add you manually.",
+                "🎉 Congratulations!\n\n"
+                "✅ VIP Access Approved\n\n"
+                "Couldn't auto-generate an invite link — please contact the "
+                "admin so they can add you manually.",
                 reply_markup=kb_verified(None),
             )
     else:
@@ -365,15 +498,59 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
         giveup = max(1, int(PENDING_AUTO_GIVEUP_HOURS))
         await message.answer(
             "🟡 Almost there!\n\n"
-            "Your Exness account is registered under our partner, but it's "
-            "not yet activated. To activate, do one of the following:\n\n"
-            f"• Place your first trade, or\n"
+            "Your Exness account is connected under our partner, but it's "
+            "not activated yet. To activate, do one of the following:\n\n"
+            "• Place your first trade, or\n"
             f"• Make a deposit of ${int(MIN_DEPOSIT_USD)} or more.\n\n"
-            f"We'll auto-check every ~{poll} minutes for the next "
-            f"{giveup} hours. After that, just tap \"Re-check now\" "
-            "whenever you're ready.",
+            f"We'll auto-check every ~{poll} minutes for the next {giveup} "
+            "hours. After that, tap “Re-check now” whenever you're ready.",
             reply_markup=kb_pending_help(),
         )
+
+
+# ---------------------------------------------------------------------------
+# The Join-VIP funnel: start at the first missing piece.
+# ---------------------------------------------------------------------------
+async def _enter_funnel(user: User | None, message: Message,
+                        state: FSMContext, bot: Bot,
+                        *, force_uid: bool = False) -> None:
+    """Move the user to the next required step (email → phone → UID), or
+    re-run the check if everything is on file.
+
+    `force_uid=True` jumps straight to the UID step regardless (used by
+    the "I entered the wrong ID" button) as long as email + phone exist.
+    """
+    if user is None:
+        await message.answer(EMAIL_PROMPT_TEXT, reply_markup=kb_cancel())
+        await state.set_state(VerifyState.awaiting_email)
+        return
+
+    if not user.email:
+        await message.answer(EMAIL_PROMPT_TEXT, reply_markup=kb_cancel())
+        await state.set_state(VerifyState.awaiting_email)
+        return
+
+    if not user.phone:
+        await message.answer(PHONE_PROMPT_TEXT, reply_markup=kb_phone_request())
+        await state.set_state(VerifyState.awaiting_phone)
+        return
+
+    if force_uid or not user.exness_uid:
+        if force_uid and user.exness_uid:
+            await message.answer(
+                f"✏️ Current Exness ID on file: {user.exness_uid}\n\n"
+                + UID_PROMPT_TEXT,
+                reply_markup=kb_cancel(),
+            )
+        else:
+            await message.answer(UID_PROMPT_TEXT, reply_markup=kb_cancel())
+        await state.set_state(VerifyState.awaiting_uid)
+        return
+
+    # Everything on file → just re-check.
+    await state.clear()
+    await message.answer(VERIFY_DELAY_TEXT)
+    await _verify_and_route(user, message, bot)
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +560,7 @@ ADMIN_PANEL_TEXT = (
     "🛠 Admin panel\n\n"
     "Quick reference (full list via /help):\n"
     "/stats — counts per status\n"
-    "/user <telegram_id|UID> — user info\n"
+    "/user <telegram_id|email|UID> — user info\n"
     "/check <UID> — manual API check\n"
     "/kick <telegram_id> — manual kick\n"
     "/unflag <telegram_id> — restore user\n"
@@ -420,225 +597,223 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     if user.status == "verified":
         await message.answer(
             f"✅ You're already verified, {tg.first_name or 'friend'}!\n\n"
-            "You have lifetime access to the VIP channel as long as your "
-            "Exness account stays active under our partner.",
+            "VIP access is active. Need the invite link again? Tap below.",
             reply_markup=kb_verified(None),
         )
         return
 
     if user.status == "pending":
         await message.answer(
-            "🟡 You're already in the queue.\n\n"
-            "We're waiting for your account to activate (first trade or "
-            f"first deposit ≥ ${int(MIN_DEPOSIT_USD)}). Once it does, "
-            "we'll DM your invite link.",
+            "🟡 You're in the queue.\n\n"
+            "We're waiting for your account to activate (first trade or a "
+            f"deposit ≥ ${int(MIN_DEPOSIT_USD)}). Once it does, we'll DM "
+            "your invite link.",
             reply_markup=kb_pending_help(),
         )
         return
 
-    if user.status in ("warned", "kicked"):
-        await message.answer(
-            "👋 Welcome back!\n\n"
-            "You can re-verify your Exness account below to regain access.",
-            reply_markup=kb_main_menu(has_uid=bool(user.exness_uid)),
-        )
-        return
-
-    await message.answer(
-        welcome_text(tg.first_name),
-        reply_markup=kb_main_menu(has_uid=bool(user.exness_uid)),
-    )
+    # onboarding / warned / kicked → show the main menu.
+    await message.answer(welcome_text(tg.first_name), reply_markup=kb_main_menu())
 
 
 # ---------------------------------------------------------------------------
-# Callback: How It Works
-# ---------------------------------------------------------------------------
-@router.callback_query(F.data == "how_it_works")
-async def cb_how_it_works(callback: CallbackQuery) -> None:
-    await _safe_edit(callback, HOW_IT_WORKS_TEXT, reply_markup=kb_back_to_menu())
-    await callback.answer()
-
-
-# ---------------------------------------------------------------------------
-# Callback: Back to Menu
+# Main-menu callbacks
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "back_to_menu")
 async def cb_back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await _safe_edit(
         callback, welcome_text(callback.from_user.first_name),
-        reply_markup=await _kb_main_menu_for(callback.from_user.id),
+        reply_markup=kb_main_menu(),
     )
     await callback.answer()
 
 
-# ---------------------------------------------------------------------------
-# Callback: Cancel verify
-# ---------------------------------------------------------------------------
-@router.callback_query(F.data == "cancel_verify")
-async def cb_cancel_verify(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data == "how_it_works")
+async def cb_how_it_works(callback: CallbackQuery) -> None:
+    await _safe_edit(callback, HOW_IT_WORKS_TEXT, reply_markup=kb_back_to_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "register_exness")
+async def cb_register_exness(callback: CallbackQuery) -> None:
+    await _safe_edit(callback, register_text(), reply_markup=kb_register_screen())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "join_vip")
+async def cb_join_vip(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    try:
-        await callback.message.answer(
-            "Cancelled.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-    except Exception:
-        pass
-    await _safe_edit(
-        callback, welcome_text(callback.from_user.first_name),
-        reply_markup=await _kb_main_menu_for(callback.from_user.id),
-    )
-    await callback.answer()
-
-
-# ---------------------------------------------------------------------------
-# Callback: My Status
-# ---------------------------------------------------------------------------
-@router.callback_query(F.data == "my_status")
-async def cb_my_status(callback: CallbackQuery) -> None:
     user = await User.filter(telegram_id=callback.from_user.id).first()
-    if not user:
+    if user and user.status == "verified":
         await _safe_edit(
             callback,
-            welcome_text(callback.from_user.first_name),
-            reply_markup=kb_main_menu(),
+            "✅ You're already verified — VIP access is active.",
+            reply_markup=kb_verified(None),
+        )
+        await callback.answer()
+        return
+    await _safe_edit(callback, JOIN_VIP_CHOICE_TEXT, reply_markup=kb_join_vip_choice())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "acc_under")
+async def cb_acc_under(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    user = await _ensure_user(callback.from_user)
+    if user.status == "verified":
+        await _safe_edit(
+            callback, "✅ You're already verified — VIP access is active.",
+            reply_markup=kb_verified(None),
+        )
+        await callback.answer()
+        return
+    await callback.answer()
+    # The funnel sends fresh messages (FSM prompts), so just acknowledge
+    # the callback and let _enter_funnel drive.
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await _enter_funnel(user, callback.message, state, bot)
+
+
+@router.callback_query(F.data == "acc_not_under")
+async def cb_acc_not_under(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _safe_edit(callback, switch_partner_text(), reply_markup=kb_switch_partner())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "create_new_exness")
+async def cb_create_new_exness(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _safe_edit(
+        callback, create_new_text(), reply_markup=kb_create_new(), parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "check_status")
+async def cb_check_status(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await state.clear()
+    user = await User.filter(telegram_id=callback.from_user.id).first()
+
+    if not user or not user.exness_uid:
+        await _safe_edit(
+            callback,
+            "📊 Account Verification\n\n"
+            "We don't have an Exness ID on file for you yet. Tap “Join VIP "
+            "for Free” to get started.",
+            reply_markup=kb_status_no_uid(),
         )
         await callback.answer()
         return
 
-    label = {
-        "onboarding": "👋 Not yet verified",
-        "pending": "🟡 Pending activation",
-        "verified": "✅ Verified — VIP active",
-        "warned": "⚠️ Warning — please trade soon",
-        "kicked": "❌ Removed — re-verify to rejoin",
-    }.get(user.status, user.status)
-
-    flags = user.last_progress_flags or "[]"
-    try:
-        flags_list = json.loads(flags)
-    except Exception:
-        flags_list = []
-
-    summary = (
-        f"📊 Your Status\n\n"
-        f"State: {label}\n"
-        f"Exness UID: {user.exness_uid or '—'}\n"
-        f"Last partner status: {user.last_client_status or '—'}\n"
-        f"Last progress: {', '.join(flags_list) if flags_list else '—'}\n"
-        f"Last deposit total: "
-        f"${float(user.last_deposit_total or 0):.2f}\n"
-    )
-    await _safe_edit(callback, summary, reply_markup=kb_status(bool(user.exness_uid)))
-    await callback.answer()
-
-
-# ---------------------------------------------------------------------------
-# Callback: Start verify (entry to phone request)
-# ---------------------------------------------------------------------------
-@router.callback_query(F.data == "start_verify")
-async def cb_start_verify(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    user = await User.filter(telegram_id=callback.from_user.id).first()
-
-    if user and user.status == "verified":
+    if user.status == "verified":
         await _safe_edit(
             callback,
-            "✅ You're already verified.\n\nNothing to do — enjoy the VIP channel.",
+            "✅ VIP Access Approved\n\n"
+            "Your account is verified. Need the invite link again? Tap below.",
             reply_markup=kb_verified(None),
         )
         await callback.answer()
         return
 
-    # Already gave us phone+UID → just re-run the check.
-    if user and user.exness_uid and user.phone:
-        await callback.answer("Re-checking…")
-        await _safe_edit(callback, "🔁 Re-checking your Exness account…")
-        await _verify_and_route(user, callback.message, bot)
-        return
-
-    # If they have phone but not UID, jump straight to UID step.
-    if user and user.phone:
-        await state.set_state(VerifyState.awaiting_uid)
-        await _safe_edit(callback, UID_PROMPT_TEXT, reply_markup=kb_cancel())
-        await callback.answer()
-        return
-
-    # Otherwise start with phone.
-    await state.set_state(VerifyState.awaiting_phone)
+    # pending / onboarding / warned / kicked → run a fresh check.
+    await callback.answer("Checking…")
     try:
-        await callback.message.delete()
+        await callback.message.edit_text(VERIFY_DELAY_TEXT)
     except Exception:
-        pass
-    await callback.message.answer(
-        "📱 First, please share your phone number.",
-        reply_markup=kb_phone_request(),
-    )
-    await callback.answer()
+        await callback.message.answer(VERIFY_DELAY_TEXT)
+    await _verify_and_route(user, callback.message, bot)
 
 
-# ---------------------------------------------------------------------------
-# Callback: Re-check pending now
-# ---------------------------------------------------------------------------
 @router.callback_query(F.data == "recheck_pending")
 async def cb_recheck_pending(callback: CallbackQuery, bot: Bot) -> None:
     user = await User.filter(telegram_id=callback.from_user.id).first()
     if not user or not user.exness_uid:
-        await callback.answer("No UID on file yet.", show_alert=True)
+        await callback.answer("No Exness ID on file yet.", show_alert=True)
         return
     await callback.answer("Re-checking…")
     await _verify_and_route(user, callback.message, bot)
 
 
-# ---------------------------------------------------------------------------
-# Callback: Edit Exness UID — let the user re-paste a different one
-# ---------------------------------------------------------------------------
 @router.callback_query(F.data == "edit_uid")
-async def cb_edit_uid(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_edit_uid(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     user = await User.filter(telegram_id=callback.from_user.id).first()
     if not user:
         await _safe_edit(
-            callback,
-            welcome_text(callback.from_user.first_name),
+            callback, welcome_text(callback.from_user.first_name),
             reply_markup=kb_main_menu(),
         )
         await callback.answer()
         return
+    await callback.answer()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await _enter_funnel(user, callback.message, state, bot, force_uid=True)
 
-    # Phone first if we don't have one yet — falls through to the regular
-    # verify funnel which collects phone before UID.
-    if not user.phone:
-        await state.set_state(VerifyState.awaiting_phone)
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
+
+@router.callback_query(F.data == "new_invite")
+async def cb_new_invite(callback: CallbackQuery, bot: Bot) -> None:
+    user = await User.filter(telegram_id=callback.from_user.id).first()
+    if not user or user.status != "verified":
+        await callback.answer("Only verified members can get an invite link.", show_alert=True)
+        return
+    invite = await _generate_invite(bot, user.telegram_id)
+    if invite:
         await callback.message.answer(
-            "📱 First, please share your phone number.",
-            reply_markup=kb_phone_request(),
+            "🔗 Here's a fresh invite link (single-use, expires in 24h):\n\n"
+            f"{invite}",
+            reply_markup=kb_verified(invite),
         )
         await callback.answer()
-        return
+    else:
+        await callback.answer("Couldn't generate a link — contact the admin.", show_alert=True)
 
-    await state.set_state(VerifyState.awaiting_uid)
-    current = user.exness_uid or "—"
-    await _safe_edit(
-        callback,
-        f"✏️ Change your Exness account ID\n\n"
-        f"Current ID on file: {current}\n\n"
-        f"Send your correct Exness account ID below and we'll re-check "
-        f"automatically.\n\n"
-        + WHERE_TO_FIND_UID,
-        reply_markup=kb_cancel(),
+
+@router.callback_query(F.data == "cancel_verify")
+async def cb_cancel_verify(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    try:
+        await callback.message.answer("Cancelled.", reply_markup=ReplyKeyboardRemove())
+    except Exception:
+        pass
+    await callback.message.answer(
+        welcome_text(callback.from_user.first_name), reply_markup=kb_main_menu()
     )
     await callback.answer()
 
 
 # ---------------------------------------------------------------------------
-# FSM: receive phone
+# FSM step 1 — email
+# ---------------------------------------------------------------------------
+@router.message(StateFilter(VerifyState.awaiting_email), F.text)
+async def on_email_input(message: Message, state: FSMContext, bot: Bot) -> None:
+    email = normalize_email(message.text)
+    if not email:
+        await message.answer(
+            "That doesn't look like a valid email address.\n\n"
+            "Please enter the email you used for your Exness account "
+            "(e.g. name@example.com), or tap Cancel.",
+            reply_markup=kb_cancel(),
+        )
+        return
+    user = await _ensure_user(message.from_user)
+    user.email = email
+    await user.save()
+    await message.answer("✅ Email saved.")
+    # Move to the next missing step.
+    await _enter_funnel(user, message, state, bot)
+
+
+# ---------------------------------------------------------------------------
+# FSM step 2 — phone
 # ---------------------------------------------------------------------------
 @router.message(StateFilter(VerifyState.awaiting_phone), F.contact)
-async def on_phone_contact(message: Message, state: FSMContext) -> None:
+async def on_phone_contact(message: Message, state: FSMContext, bot: Bot) -> None:
     contact = message.contact
     if contact.user_id and contact.user_id != message.from_user.id:
         await message.answer(
@@ -646,48 +821,41 @@ async def on_phone_contact(message: Message, state: FSMContext) -> None:
             reply_markup=kb_phone_request(),
         )
         return
-
-    phone = normalize_phone(contact.phone_number)
-    await User.filter(telegram_id=message.from_user.id).update(phone=phone)
-
-    await state.set_state(VerifyState.awaiting_uid)
-    await message.answer(
-        "✅ Got it.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    await message.answer(UID_PROMPT_TEXT, reply_markup=kb_cancel())
+    user = await _ensure_user(message.from_user)
+    user.phone = normalize_phone(contact.phone_number)
+    await user.save()
+    await message.answer("✅ Phone saved.", reply_markup=ReplyKeyboardRemove())
+    await _enter_funnel(user, message, state, bot)
 
 
 @router.message(StateFilter(VerifyState.awaiting_phone), F.text)
-async def on_phone_text(message: Message, state: FSMContext) -> None:
-    """Some users won't tap the contact button — accept typed phone too."""
+async def on_phone_text(message: Message, state: FSMContext, bot: Bot) -> None:
     phone = normalize_phone(message.text)
     if not phone or len(phone) < 8:
         await message.answer(
             "That doesn't look like a valid phone number.\n\n"
-            "Please tap the \"Share my phone\" button below, "
-            "or type the number in international format (e.g. +14155551234).",
+            "Please tap the “Share my phone” button below, or type the "
+            "number in international format (e.g. +14155551234).",
             reply_markup=kb_phone_request(),
         )
         return
-    await User.filter(telegram_id=message.from_user.id).update(phone=phone)
-    await state.set_state(VerifyState.awaiting_uid)
-    await message.answer("✅ Got it.", reply_markup=ReplyKeyboardRemove())
-    await message.answer(UID_PROMPT_TEXT, reply_markup=kb_cancel())
+    user = await _ensure_user(message.from_user)
+    user.phone = phone
+    await user.save()
+    await message.answer("✅ Phone saved.", reply_markup=ReplyKeyboardRemove())
+    await _enter_funnel(user, message, state, bot)
 
 
 # ---------------------------------------------------------------------------
-# FSM: receive UID
+# FSM step 3 — Exness ID (trading account number / UUID / hex prefix)
 # ---------------------------------------------------------------------------
 @router.message(StateFilter(VerifyState.awaiting_uid), F.text)
 async def on_uid_input(message: Message, state: FSMContext, bot: Bot) -> None:
     raw = (message.text or "").strip()
-    # Accept either a numeric trading account number (e.g. 87654321), the
-    # 8-char hex Client ID prefix Exness emails to partners, or a full UUID.
     cleaned = "".join(ch for ch in raw if ch.isalnum() or ch == "-").strip("-")
     if not cleaned or len(cleaned) < 4:
         await message.answer(
-            "That doesn't look like a valid Exness account ID.\n\n"
+            "That doesn't look like a valid Exness ID.\n\n"
             "Send your trading account number (8-9 digits, e.g. 12345678) "
             "or your full Client UUID. Try again, or tap Cancel.",
             reply_markup=kb_cancel(),
@@ -695,31 +863,40 @@ async def on_uid_input(message: Message, state: FSMContext, bot: Bot) -> None:
         return
     uid = cleaned
 
-    # Prevent two Telegram users from claiming the same UID.
     other = await User.filter(exness_uid=uid).exclude(telegram_id=message.from_user.id).first()
     if other:
         await message.answer(
-            "⚠️ This Exness account is already linked to another Telegram user.\n\n"
-            "If this is your account, please contact the admin.",
+            "⚠️ This Exness account is already linked to another Telegram "
+            "user.\n\nIf this is your account, please contact the admin.",
             reply_markup=kb_back_to_menu(),
         )
         await state.clear()
         return
 
-    await User.filter(telegram_id=message.from_user.id).update(exness_uid=uid)
+    user = await _ensure_user(message.from_user)
+    user.exness_uid = uid
+    await user.save()
     await state.clear()
-
-    user = await User.filter(telegram_id=message.from_user.id).first()
-    if not user:
-        return
-
-    await message.answer("🔎 Checking your Exness account…")
+    await message.answer(VERIFY_DELAY_TEXT)
     await _verify_and_route(user, message, bot)
 
 
 # ---------------------------------------------------------------------------
-# /help — for users only; admin /help is handled in handlers/admin.py.
+# /help — users get the welcome screen; admin /help lives in handlers/admin.py.
 # ---------------------------------------------------------------------------
 @router.message(Command("help"), F.chat.type == "private", ~F.from_user.id.in_(ADMIN_IDS))
 async def cmd_help(message: Message, state: FSMContext) -> None:
     await cmd_start(message, state)
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat: old keyboards may still emit these callbacks.
+# ---------------------------------------------------------------------------
+@router.callback_query(F.data == "start_verify")
+async def cb_legacy_start_verify(callback: CallbackQuery, state: FSMContext) -> None:
+    await cb_join_vip(callback, state)
+
+
+@router.callback_query(F.data == "my_status")
+async def cb_legacy_my_status(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await cb_check_status(callback, state, bot)

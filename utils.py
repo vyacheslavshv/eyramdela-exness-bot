@@ -103,6 +103,7 @@ async def init_db() -> None:
     # Defensive: if an older `users` table exists from a prior version,
     # try to add any new columns. Failing means the column already exists.
     extra_columns = [
+        "email VARCHAR(255)",
         "phone VARCHAR(32)",
         "exness_uid VARCHAR(100)",
         "last_check_at TIMESTAMP",
@@ -153,6 +154,25 @@ def fmt_dt(dt: Optional[datetime]) -> str:
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Email validation (lightweight — we only sanity-check the shape)
+# ---------------------------------------------------------------------------
+import re as _re
+
+_EMAIL_RE = _re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
+
+
+def normalize_email(raw: Optional[str]) -> Optional[str]:
+    """Trim + lowercase + shape-check. Returns None if it doesn't look like
+    an email at all."""
+    if not raw:
+        return None
+    e = raw.strip().lower()
+    if not e or len(e) > 255 or not _EMAIL_RE.match(e):
+        return None
+    return e
 
 
 # ---------------------------------------------------------------------------

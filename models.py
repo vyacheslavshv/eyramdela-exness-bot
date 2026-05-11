@@ -9,6 +9,7 @@ class User(Model):
     telegram_id = fields.BigIntField(unique=True, index=True)
     username = fields.CharField(max_length=255, null=True)
     first_name = fields.CharField(max_length=255, null=True)
+    email = fields.CharField(max_length=255, null=True, index=True)   # Exness-registered email
     phone = fields.CharField(max_length=32, null=True)            # E.164
     exness_uid = fields.CharField(max_length=100, null=True, unique=True, index=True)
 

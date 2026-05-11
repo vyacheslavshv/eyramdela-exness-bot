@@ -63,7 +63,7 @@ async def _send_long(message: Message, text: str,
 HELP_TEXT = (
     "🛠 Admin commands\n\n"
     "/stats — counts per status, today's activity\n"
-    "/user <telegram_id|UID> — full info dump for one user\n"
+    "/user <telegram_id|email|UID> — full info dump for one user\n"
     "/check <UID> — manual API check, dump raw response\n"
     "/kick <telegram_id> — manual kick + DB update + audit\n"
     "/unflag <telegram_id> — restore kicked/warned user\n"
@@ -133,6 +133,10 @@ async def _resolve_user(query: str) -> Optional[User]:
         u = await User.filter(telegram_id=int(q)).first()
         if u:
             return u
+    if "@" in q:
+        u = await User.filter(email=q.lower()).first()
+        if u:
+            return u
     return await User.filter(exness_uid=q).first()
 
 
@@ -140,7 +144,7 @@ async def _resolve_user(query: str) -> Optional[User]:
 async def cmd_user(message: Message) -> None:
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("Usage: /user <telegram_id|exness_uid>")
+        await message.answer("Usage: /user <telegram_id | email | exness_uid>")
         return
 
     user = await _resolve_user(args[1])
@@ -157,6 +161,7 @@ async def cmd_user(message: Message) -> None:
     await message.answer(
         f"👤 @{user.username or '—'} ({user.first_name or '—'})\n"
         f"Telegram ID: {user.telegram_id}\n"
+        f"Email: {user.email or '—'}\n"
         f"Phone: {user.phone or '—'}\n"
         f"Exness UID: {user.exness_uid or '—'}\n\n"
         f"Status: {user.status}\n"
@@ -411,14 +416,15 @@ async def cmd_export(message: Message) -> None:
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow([
-        "telegram_id", "username", "first_name", "phone", "exness_uid",
-        "status", "started_at", "verified_at", "last_check_at",
-        "last_client_status", "last_deposit_total", "last_trade_at",
+        "telegram_id", "username", "first_name", "email", "phone",
+        "exness_uid", "status", "started_at", "verified_at",
+        "last_check_at", "last_client_status", "last_deposit_total",
+        "last_trade_at",
     ])
     for u in rows:
         writer.writerow([
             u.telegram_id, u.username or "", u.first_name or "",
-            u.phone or "", u.exness_uid or "", u.status,
+            u.email or "", u.phone or "", u.exness_uid or "", u.status,
             (u.started_at.isoformat() if u.started_at else ""),
             (u.verified_at.isoformat() if u.verified_at else ""),
             (u.last_check_at.isoformat() if u.last_check_at else ""),

@@ -11,48 +11,65 @@ auto-removed.
 
 **For your users**
 
-1. The user opens the bot and taps `/start`. They see a main menu:
-   * 🚀 Get Free VIP Access
-   * ℹ️ How It Works
-   * 📊 Check My Status
-   * ✏️ Change Exness ID *(only if they've already entered one)*
-   * 🟢 Register on Exness *(your referral link)*
-2. **Get Free VIP Access** asks for a phone number (Telegram contact
-   share button) and then for the **Exness account ID**. The bot
-   accepts three formats:
-   * 8-9 digit trading account number (e.g. `12345678`) — the number
-     the user sees on each account card in *My Accounts*. **This is
-     the recommended format** since it's what users actually see.
-   * Full Client UUID (e.g. `bcd562bb-1bed-49d4-…`) — internal
-     identifier, rarely visible to users.
-   * 8-char hex Client ID prefix (e.g. `bcd562bb`) — only what Exness
-     emails to **you** as a partner on new registrations.
-3. The bot calls the Exness Partnership API:
-   * **Not under your partner** → user is told what to do: register
-     via the green button, OR if they already have an Exness account,
-     the bot prints your partner code as tap-to-copy text and tells
-     them to ask Exness Live Chat to switch their partner code (Exness
-     does not allow self-service partner-code change).
-   * **Under your partner but not yet activated** → user lands on the
-     "🟡 Almost there!" screen. The bot tells them to either deposit
-     ≥ `$MIN_DEPOSIT_USD` or place their first trade, with direct deep
-     links to **💵 Make a Deposit** and **📈 Open Exness (Trade)**. The
-     bot then auto-checks every `PENDING_POLL_MINUTES` for the next
-     `PENDING_AUTO_GIVEUP_HOURS` hours. After that window, the user can
-     resume manually by tapping **🔁 Re-check now**.
-   * **Activated** → the bot DMs a single-use channel invite link that
-     expires in 24 hours and auto-approves the join request when the
-     user clicks it.
+1. The user opens the bot and taps `/start`. The main menu has four
+   buttons, in this order:
+   * 📖 How It Works — the step-by-step explainer.
+   * 🟢 Register on Exness — shows your partner link + a "Join VIP for
+     Free" prompt.
+   * 🚀 Join VIP for Free — the verification funnel (below).
+   * 📊 Check Status — re-runs a check and reports Approved / Pending /
+     Not connected.
+2. **Join VIP for Free** first asks: *"Do you already have an Exness
+   account?"* with three choices:
+   * ✅ **Yes, my account is under you** → the funnel asks, in order:
+     1. **Email address** used for the Exness account.
+     2. **Phone number** (Telegram contact-share button, or typed).
+     3. **Exness ID (Trading Account Number)** — the bot accepts the
+        8-9 digit trading account number (what users see in *My
+        Accounts* — **the recommended format**), a full Client UUID,
+        or the 8-char hex Client ID prefix that Exness emails to you
+        as a partner.
+   * ❌ **My account is NOT under you** → shows the step-by-step
+     "Switch Partner on Exness" instructions (log in → Live Chat →
+     "Change Partner" → Signals/Education → submit via your partner
+     link → wait for approval → create a NEW MT4/MT5 account →
+     transfer funds → archive old). Plus a **🆕 Create New Exness
+     Account** button for the case where Exness rejects the partner
+     change ("user not eligible"), which shows the create-a-fresh-
+     account flow (your partner link + tap-to-copy partner code).
+   * 📊 Check My Status.
+3. After the funnel, the bot calls the Exness Partnership API:
+   * **Not connected under your partner** → "❌ Your account is
+     currently not connected under our partner link" + buttons:
+     🔀 Switch Partner, ✏️ I entered the wrong ID, 📊 Check My Status.
+   * **Connected but not activated** → "🟡 Almost there!" — deposit
+     ≥ `$MIN_DEPOSIT_USD` or place a trade, with direct deep links to
+     **💵 Make a Deposit** and **📈 Open Exness (Trade)**. The bot
+     auto-checks every `PENDING_POLL_MINUTES` for the next
+     `PENDING_AUTO_GIVEUP_HOURS` hours; after that, the user taps
+     **🔁 Re-check now** to resume.
+   * **Activated** → "🎉 Congratulations! ✅ VIP Access Approved" + a
+     single-use channel invite link that expires in 24 hours. The bot
+     auto-approves the join request. A **🔗 Get Invite Link Again**
+     button mints a fresh link on demand.
+
+> **Note on email.** The Exness Partnership API has no email-based
+> lookup — verification is always done by the trading account number.
+> The email is collected for your records (it shows up in `/user` and
+> `/export`, and you can look a user up by it with `/user <email>`).
+> Partner-change detection works regardless, via the re-check loop.
 
 **For verified users (re-check loop)**
 
 Every `RECHECK_INTERVAL_HOURS`, the bot re-verifies every active member:
 
-* **Partner change** / `LEFT` / `CHANGING` → kicked immediately with a
-  DM explaining why.
+* **Partner change** / `LEFT` / `CHANGING` / no longer in your client
+  list → kicked immediately with a DM explaining why.
 * **Inactivity** past `INACTIVITY_WARN_DAYS` (no trades) → warned via
   DM. If still inactive after `WARNING_GRACE_DAYS`, kicked. If they
-  trade again before the kick, automatically restored.
+  trade again before the kick, automatically restored. (Users who
+  qualified by deposit alone, with no trade timestamp, are never
+  kicked for inactivity.)
 * **Withdrew all funds** (had a real deposit, balance now < $1) → kicked.
 * **Transient Exness API errors NEVER kick.** Only a definitive negative
   answer triggers any action.
@@ -145,7 +162,7 @@ Send these in a DM to the bot from any account listed in `ADMIN_IDS`.
 | `/start` | Show the admin panel |
 | `/help` | Full command reference |
 | `/stats` | Counts per status + audit events today + live channel member count |
-| `/user <telegram_id>` *or* `/user <UID>` | Full info dump for one user |
+| `/user <telegram_id>` *or* `/user <email>` *or* `/user <UID>` | Full info dump for one user |
 | `/check <UID>` | Manual Exness API check, raw JSON output for debugging |
 | `/kick <telegram_id>` | Manually kick + log |
 | `/unflag <telegram_id>` | Restore a kicked/warned user back to verified |
@@ -236,6 +253,6 @@ checking. Ask them to tap **🔁 Re-check now** in the bot or send
 `/start` — the timer resets and polling resumes.
 
 **A user mistyped their Exness ID.**
-They can fix it themselves: in the bot's main menu, tap
-**✏️ Change Exness ID**. They'll be re-prompted for the correct one
-and the bot will re-check immediately.
+On the "not connected" and "pending" screens there's an
+**✏️ I entered the wrong ID** button — it re-prompts for the Exness ID
+and re-checks immediately. (It keeps their email and phone on file.)
