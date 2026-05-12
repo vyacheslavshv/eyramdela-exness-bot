@@ -236,10 +236,11 @@ HOW_IT_WORKS_TEXT = (
     "1️⃣ Share your email address\n"
     "2️⃣ Share your phone number\n"
     "3️⃣ Share your Exness ID (Trading Account Number)\n"
-    "4️⃣ Place a trade to activate your account. Inactive or empty "
-    "accounts will not get access.\n"
-    f"💰 Minimum deposit required: ${int(MIN_DEPOSIT_USD)}\n"
-    "5️⃣ Once verified, you'll receive your VIP invite link.\n\n"
+    "4️⃣ Fund your account to activate it. Empty / never-funded accounts "
+    "don't get access.\n"
+    + (f"💰 Minimum deposit: ${int(MIN_DEPOSIT_USD)}\n"
+       if MIN_DEPOSIT_USD > 10 else "💰 Just make your first deposit (any amount).\n")
+    + "5️⃣ Once verified, you'll receive your VIP invite link.\n\n"
     "⚠️ Important:\n"
     "We periodically recheck all accounts. As long as your account "
     "remains connected under our partner link, you'll continue "
@@ -406,8 +407,10 @@ async def _persist_snapshot(user: User, snapshot) -> None:
     user.last_check_at = utcnow()
     user.last_client_status = snapshot.client_status
     user.last_progress_flags = _serialize_flags(snapshot.progress_flags)
+    # last_deposit_total holds the Exness deposit *range-ID* (1–6), not a
+    # dollar figure — see exness_api.bucket_label.
     try:
-        user.last_deposit_total = Decimal(str(round(snapshot.deposit_total or 0, 2)))
+        user.last_deposit_total = Decimal(int(getattr(snapshot, "deposit_bucket", 0) or 0))
     except Exception:
         user.last_deposit_total = Decimal("0")
     user.last_trade_at = snapshot.last_trade_at
@@ -456,7 +459,7 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
         )
         return
 
-    activated = is_activated(snapshot.progress_flags, snapshot.deposit_total)
+    activated = is_activated(snapshot.progress_flags, snapshot.deposit_bucket)
     await _persist_snapshot(user, snapshot)
 
     if activated:
@@ -493,17 +496,20 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
         await _audit(
             user.telegram_id,
             "pending_activation",
-            f"flags={snapshot.progress_flags} deposit={snapshot.deposit_total}",
+            f"flags={snapshot.progress_flags} deposit_bucket={snapshot.deposit_bucket}",
         )
         poll = max(1, int(PENDING_POLL_MINUTES))
         giveup = max(1, int(PENDING_AUTO_GIVEUP_HOURS))
+        deposit_line = (
+            f"Make a deposit of at least ${int(MIN_DEPOSIT_USD)} on your "
+            "Exness account."
+            if MIN_DEPOSIT_USD > 10
+            else "Make your first deposit on your Exness account."
+        )
         if ACTIVATION_REQUIRE_TRADE:
-            steps = (
-                f"1️⃣ Make a deposit of ${int(MIN_DEPOSIT_USD)} or more.\n"
-                "2️⃣ Place at least one trade.\n"
-            )
+            steps = f"1️⃣ {deposit_line}\n2️⃣ Place at least one trade.\n"
         else:
-            steps = f"➡️ Make a deposit of ${int(MIN_DEPOSIT_USD)} or more.\n"
+            steps = f"➡️ {deposit_line}\n"
         await message.answer(
             "🟡 Almost there!\n\n"
             "Your Exness account is connected under our partner, but it's "
@@ -611,7 +617,10 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         return
 
     if user.status == "pending":
-        need = f"a deposit of ${int(MIN_DEPOSIT_USD)} or more"
+        need = (
+            f"a deposit of at least ${int(MIN_DEPOSIT_USD)}"
+            if MIN_DEPOSIT_USD > 10 else "your first deposit (any amount)"
+        )
         if ACTIVATION_REQUIRE_TRADE:
             need += " plus at least one trade"
         await message.answer(

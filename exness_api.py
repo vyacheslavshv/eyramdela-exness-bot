@@ -216,38 +216,106 @@ async def _accounts_full_scan() -> Optional[list[dict]]:
     return []
 
 
-async def _clients_paginated(max_pages: int = 20, page_size: int = 200) -> Optional[list[dict]]:
+# A partner can have thousands of clients (one production partner has
+# 2.6k+). The full /api/v2/reports/clients/ scan is ~N/200 HTTP calls and
+# holds the whole list in memory — doing it per pending-user every poll
+# cycle is what hammered a small VPS. Cache the scan result and reuse it.
+_CLIENTS_CACHE_TTL = 600.0   # seconds
+_clients_cache: dict = {"data": None, "ts": 0.0}
+_clients_lock = asyncio.Lock()
+
+
+async def _clients_paginated(max_pages: int = 60, page_size: int = 200,
+                             *, force: bool = False) -> Optional[list[dict]]:
     """Page through /api/v2/reports/clients/ and return every row.
+
+    Cached for ``_CLIENTS_CACHE_TTL`` seconds — the client list changes
+    slowly, and a burst of UID resolutions (or the pending-poll job)
+    must not trigger a fresh multi-page scan each time.
 
     The Exness API truncates ``client_uid`` to 8 hex chars in the
     ``/accounts/`` endpoint but returns the full 36-char UUID here, so
-    we use this scan whenever we need to upgrade a short id (or numeric
-    trading account) to the canonical UUID.
+    this scan is how we upgrade a short id / numeric trading account to
+    the canonical UUID.
     """
-    out: list[dict] = []
-    for page in range(max_pages):
-        offset = page * page_size
-        data = await _api_get(
-            "/api/v2/reports/clients/",
-            params={"limit": page_size, "offset": offset},
-        )
-        if data is None:
-            return None
-        items = (
-            data.get("data")
-            if isinstance(data, dict)
-            else (data if isinstance(data, list) else [])
-        )
-        if not items:
-            break
-        out.extend(items)
-        totals = data.get("totals") if isinstance(data, dict) else {}
-        avail = (totals or {}).get("available_for_request") or 0
-        if len(out) >= avail > 0:
-            break
-        if len(items) < page_size:
-            break
-    return out
+    async with _clients_lock:
+        now = time.time()
+        if not force and _clients_cache["data"] is not None and \
+                now - _clients_cache["ts"] < _CLIENTS_CACHE_TTL:
+            return _clients_cache["data"]
+
+        out: list[dict] = []
+        for page in range(max_pages):
+            offset = page * page_size
+            data = await _api_get(
+                "/api/v2/reports/clients/",
+                params={"limit": page_size, "offset": offset},
+            )
+            if data is None:
+                # On a transient error, fall back to the (possibly stale)
+                # cache rather than returning None and breaking lookups.
+                return _clients_cache["data"]
+            items = (
+                data.get("data")
+                if isinstance(data, dict)
+                else (data if isinstance(data, list) else [])
+            )
+            if not items:
+                break
+            out.extend(items)
+            totals = data.get("totals") if isinstance(data, dict) else {}
+            avail = (totals or {}).get("available_for_request") or 0
+            if len(out) >= avail > 0:
+                break
+            if len(items) < page_size:
+                break
+
+        _clients_cache["data"] = out
+        _clients_cache["ts"] = now
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Deposit / balance "range ID" buckets (Exness reports these as a tier, not
+# a dollar figure):  1: $0–10  2: $10–50  3: $50–250  4: $250–1000
+#                    5: $1000–5000  6: >$5000   (0 / missing → unknown)
+# ---------------------------------------------------------------------------
+_BUCKET_LABELS = {
+    0: "—",
+    1: "$0–10",
+    2: "$10–50",
+    3: "$50–250",
+    4: "$250–1000",
+    5: "$1000–5000",
+    6: ">$5000",
+}
+
+
+def bucket_label(b) -> str:
+    try:
+        return _BUCKET_LABELS.get(int(b or 0), str(b))
+    except (TypeError, ValueError):
+        return "—"
+
+
+def min_deposit_bucket(min_usd: float) -> int:
+    """Smallest deposit range-ID that *guarantees* the deposit is ≥ min_usd.
+
+    ``min_usd <= 0`` → 1 (any account; combine with the ftd_received flag
+    to mean "made some deposit"). Otherwise map to the bucket whose lower
+    bound covers the threshold.
+    """
+    if min_usd <= 0:
+        return 1
+    if min_usd <= 10:
+        return 2
+    if min_usd <= 50:
+        return 3
+    if min_usd <= 250:
+        return 4
+    if min_usd <= 1000:
+        return 5
+    return 6
 
 
 async def _short_uid_from_account_number(raw_digits: str) -> Optional[str | object]:
@@ -353,8 +421,11 @@ class ClientSnapshot:
     under_partner: bool
     client_status: Optional[str]            # ACTIVE / INACTIVE / LEFT / CHANGING
     progress_flags: list[str]               # synthetic, e.g. ["ftt_made", "ftd_received"]
-    deposit_total: float                    # USD
-    balance: float                          # USD (live)
+    # Exness reports money as a range-ID (1: $0–10 … 6: >$5000), not a
+    # dollar figure. 0 = unknown/missing.
+    deposit_bucket: int                     # total deposits range-ID
+    ftd_bucket: int                         # first-time-deposit range-ID
+    balance_bucket: int                     # current balance range-ID
     last_trade_at: Optional[datetime]
     client_uid: Optional[str] = None        # resolved UUID
     raw: Optional[dict] = None              # raw client row (for /check debug)
@@ -508,11 +579,16 @@ def summarize_accounts(accounts: list[dict]) -> dict:
                 dt = _coerce_dt(v)
                 if dt and (last_trade is None or dt > last_trade):
                     last_trade = dt
-    return {
-        "deposit_total": 0.0,   # accounts endpoint doesn't expose this in 2026 schema
-        "balance": 0.0,
-        "last_trade_at": last_trade,
-    }
+    return {"last_trade_at": last_trade}
+
+
+def _bucket(v) -> int:
+    """Coerce a deposit/balance range-ID to an int in 0..6."""
+    try:
+        b = int(float(v))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(6, b))
 
 
 async def fetch_snapshot(uid: str) -> Optional[ClientSnapshot]:
@@ -524,45 +600,30 @@ async def fetch_snapshot(uid: str) -> Optional[ClientSnapshot]:
             under_partner=False,
             client_status=None,
             progress_flags=[],
-            deposit_total=0.0,
-            balance=0.0,
+            deposit_bucket=0,
+            ftd_bucket=0,
+            balance_bucket=0,
             last_trade_at=None,
             client_uid=None,
             raw=None,
         )
 
-    da = _coerce_float(row.get("deposit_amount"))
-    fa = _coerce_float(row.get("ftd_amount"))
-    cb = _coerce_float(row.get("client_balance"))
-    ce = _coerce_float(row.get("client_equity"))
-    # `deposit_amount` is the running total of deposits; `ftd_amount` is the
-    # first-time-deposit amount. Take whichever is larger so a real deposit
-    # is recognized regardless of which field Exness fills in.
-    deposit_total = max(da, fa, 0.0)
-    balance = cb if row.get("client_balance") is not None else ce
-    last_trade = _last_trade_from_record(row)
     progress_flags = _flags_from_record(row)
-
-    # Exness returns the placeholder "1" across ALL numeric fields on
-    # accounts that have never deposited AND never traded (deposit_amount=1,
-    # client_balance=1, client_equity=1, ftd_amount=1, no progress flags).
-    # Recognize that exact pattern and treat it as zero — but ONLY that
-    # pattern. Any value above the placeholder is a real figure and must be
-    # trusted, even if the ftd_received flag hasn't flipped yet (it lags).
-    no_flags = (
-        "ftd_received" not in progress_flags and "ftt_made" not in progress_flags
+    deposit_bucket = _bucket(row.get("deposit_amount"))
+    ftd_bucket = _bucket(row.get("ftd_amount"))
+    balance_bucket = _bucket(
+        row.get("client_balance") if row.get("client_balance") is not None
+        else row.get("client_equity")
     )
-    looks_like_placeholder = no_flags and da <= 1 and fa <= 1 and cb <= 1 and ce <= 1
-    if looks_like_placeholder:
-        deposit_total = 0.0
-        balance = 0.0
+    last_trade = _last_trade_from_record(row)
 
     return ClientSnapshot(
         under_partner=True,
         client_status=row.get("client_status"),
         progress_flags=progress_flags,
-        deposit_total=deposit_total,
-        balance=balance,
+        deposit_bucket=deposit_bucket,
+        ftd_bucket=ftd_bucket,
+        balance_bucket=balance_bucket,
         last_trade_at=last_trade,
         client_uid=row.get("client_uid"),
         raw=row,
@@ -572,24 +633,27 @@ async def fetch_snapshot(uid: str) -> Optional[ClientSnapshot]:
 # ---------------------------------------------------------------------------
 # Activation gate
 # ---------------------------------------------------------------------------
-def is_activated(progress_flags: list[str], deposit_total_usd: float,
+def is_activated(progress_flags: list[str], deposit_bucket: int,
                  *, require_trade: bool | None = None) -> bool:
-    """Activation = the reported deposit total is at least MIN_DEPOSIT_USD.
+    """Activation = the client has made a real deposit, in a tier at or
+    above what MIN_DEPOSIT_USD requires.
 
-    We gate on the deposit **amount**, not on the ``ftd_received`` boolean
-    flag: on some accounts that flag lags behind the deposit figure for
-    hours, which left genuine depositors stuck on "pending — make a
-    deposit". A no-deposit bonus trade (ftt_made without any real deposit)
-    still doesn't qualify, because the deposit amount stays at/below the
-    placeholder "1" — well under MIN_DEPOSIT_USD.
+    Exness reports deposits as a *range-ID* (1: $0–10 … 6: >$5000), not an
+    exact dollar figure, so a precise "$X minimum" can't be enforced — we
+    map MIN_DEPOSIT_USD to the lowest range-ID that guarantees it (see
+    ``min_deposit_bucket``). `MIN_DEPOSIT_USD=0` means "any deposit".
 
-    If ACTIVATION_REQUIRE_TRADE is on, a first trade is *also* required on
-    top of the qualifying deposit.
+    ``ftd_received`` (real money came in — a no-deposit bonus trade does
+    NOT set it) is always required. If ACTIVATION_REQUIRE_TRADE is on, a
+    first trade is also required.
     """
     if require_trade is None:
         require_trade = ACTIVATION_REQUIRE_TRADE
-    if (deposit_total_usd or 0) < MIN_DEPOSIT_USD:
+    flags = set(progress_flags or [])
+    if "ftd_received" not in flags:
+        return False
+    if (deposit_bucket or 0) < min_deposit_bucket(MIN_DEPOSIT_USD):
         return False
     if require_trade:
-        return "ftt_made" in set(progress_flags or [])
+        return "ftt_made" in flags
     return True

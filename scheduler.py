@@ -69,8 +69,10 @@ async def _persist_snapshot(user: User, snap: ClientSnapshot) -> None:
         user.last_progress_flags = json.dumps(list(snap.progress_flags))
     except Exception:
         user.last_progress_flags = "[]"
+    # `last_deposit_total` now holds the Exness deposit *range-ID* (1–6),
+    # not a dollar figure — see exness_api.bucket_label / min_deposit_bucket.
     try:
-        user.last_deposit_total = Decimal(str(round(snap.deposit_total or 0, 2)))
+        user.last_deposit_total = Decimal(int(snap.deposit_bucket or 0))
     except Exception:
         user.last_deposit_total = Decimal("0")
     user.last_trade_at = snap.last_trade_at
@@ -190,7 +192,7 @@ async def check_pending_users(bot: Bot) -> None:
 
         await _persist_snapshot(user, snap)
 
-        if is_activated(snap.progress_flags, snap.deposit_total):
+        if is_activated(snap.progress_flags, snap.deposit_bucket):
             invite = await _create_invite(bot, user.telegram_id)
             await User.filter(id=user.id).update(
                 status="verified", verified_at=utcnow()
@@ -260,26 +262,23 @@ async def recheck_one_user(bot: Bot, user: User, now: datetime | None = None) ->
         return f"kicked_partner_changed ({reason})"
 
     # ---- no longer meets the activation gate → kick ----
-    # `is_activated` checks the reported deposit total against
+    # `is_activated` requires ftd_received plus a deposit tier at or above
     # MIN_DEPOSIT_USD. So this catches accounts that slipped in without a
-    # real qualifying deposit (e.g. a no-deposit bonus trade) — a genuine
-    # depositor's total doesn't drop below the threshold on re-check.
-    # Checked regardless of client_status: an account that doesn't meet
-    # the gate shouldn't be in the channel whether Exness marks it ACTIVE
-    # or INACTIVE. (LEFT / CHANGING are already handled above.)
-    if not is_activated(snap.progress_flags, snap.deposit_total):
+    # qualifying deposit (e.g. a no-deposit bonus trade) — a genuine
+    # depositor's tier doesn't drop below the bar on re-check. Checked
+    # regardless of client_status. (LEFT / CHANGING handled above.)
+    if not is_activated(snap.progress_flags, snap.deposit_bucket):
         await _kick_from_channel(bot, user.telegram_id)
         await _mark_kicked(
             user, "kicked_not_activated",
-            f"flags={snap.progress_flags} deposit={snap.deposit_total}",
+            f"flags={snap.progress_flags} deposit_bucket={snap.deposit_bucket}",
         )
         await _safe_send(
             bot, user.telegram_id,
             "❌ You've been removed from the VIP channel.\n\n"
-            f"Reason: your Exness account does not meet the activation "
-            f"requirements — a first deposit of ${int(MIN_DEPOSIT_USD)} "
-            "or more is required. Make the deposit, then re-verify from "
-            "/start to rejoin.",
+            "Reason: your Exness account does not meet the activation "
+            "requirements (a qualifying first deposit is required). Make "
+            "the deposit, then re-verify from /start to rejoin.",
         )
         await _admin_notify(
             bot,
@@ -288,30 +287,13 @@ async def recheck_one_user(bot: Bot, user: User, now: datetime | None = None) ->
         )
         return "kicked_not_activated"
 
-    # ---- balance ≈ 0 after a real deposit history → withdrew everything ----
-    # "had deposits" = the reported deposit total cleared the activation
-    # threshold at some point. An empty balance now means they withdrew.
-    # (deposit_total stays at/below the placeholder "1" for accounts that
-    # never deposited, so this never false-fires on them.)
-    had_deposits = (snap.deposit_total or 0) >= MIN_DEPOSIT_USD
-    if had_deposits and (snap.balance or 0) < 1.0:
-        await _kick_from_channel(bot, user.telegram_id)
-        await _mark_kicked(
-            user, "kicked_zero_balance",
-            f"balance={snap.balance}, dep_total={snap.deposit_total}",
-        )
-        await _safe_send(
-            bot, user.telegram_id,
-            "❌ You've been removed from the VIP channel.\n\n"
-            "Reason: your Exness account balance is empty. "
-            "Re-fund the account and re-verify from /start to rejoin.",
-        )
-        await _admin_notify(
-            bot,
-            f"💸 Kicked @{user.username or '—'} ({user.telegram_id}) "
-            f"— zero balance.",
-        )
-        return "kicked_zero_balance"
+    # NOTE: "withdrew all funds" used to be its own kick branch, but Exness
+    # only exposes the balance as a coarse range-ID (1: $0–10 … 6: >$5000),
+    # so we can't tell "$0" from "$8" — the old `balance < $1` check was
+    # against a tier number, not dollars, and was meaningless. We rely on
+    # the inactivity flow below ("no trades for N days" / client_status
+    # INACTIVE/LEFT) as the practical "this client stopped being active"
+    # signal instead.
 
     # ---- inactivity flow ----
     # Conservative rule: if Exness has not given us a last_trade

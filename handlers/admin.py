@@ -15,7 +15,15 @@ from aiogram.types import BufferedInputFile, Message
 from loguru import logger
 
 from config import ADMIN_IDS, CHANNEL_ID
-from exness_api import fetch_accounts, fetch_client, force_reauth, summarize_accounts
+from exness_api import (
+    bucket_label,
+    fetch_accounts,
+    fetch_client,
+    fetch_snapshot,
+    force_reauth,
+    is_activated,
+    resolve_client_uid,
+)
 from models import AuditLog, User
 from utils import fmt_dt, utcnow
 
@@ -127,6 +135,13 @@ async def cmd_stats(message: Message, bot: Bot) -> None:
 # /user
 # ---------------------------------------------------------------------------
 async def _resolve_user(query: str) -> Optional[User]:
+    """Find a User by telegram_id, email, or Exness identifier.
+
+    The Exness identifier can be the trading account number (e.g.
+    409851376) even though the bot stores the canonical UUID after the
+    first check — we resolve the number to a UUID via the Exness API and
+    match on that too.
+    """
     q = query.strip()
     if not q:
         return None
@@ -138,7 +153,27 @@ async def _resolve_user(query: str) -> Optional[User]:
         u = await User.filter(email=q.lower()).first()
         if u:
             return u
-    return await User.filter(exness_uid=q).first()
+    # Direct match on whatever's stored in exness_uid.
+    u = await User.filter(exness_uid=q).first()
+    if u:
+        return u
+    # Numeric trading account number → resolve to the canonical UUID.
+    if q.isdigit() or all(c in "0123456789abcdefABCDEF-" for c in q):
+        try:
+            resolved = await resolve_client_uid(q)
+            if isinstance(resolved, str):
+                u = await User.filter(exness_uid=resolved).first()
+                if u:
+                    return u
+                # Also try a prefix match (older rows may store the 8-char form).
+                short = resolved.split("-")[0]
+                if short:
+                    u = await User.filter(exness_uid__startswith=short).first()
+                    if u:
+                        return u
+        except Exception as e:
+            logger.warning(f"_resolve_user: resolve_client_uid({q}) failed: {e}")
+    return None
 
 
 @router.message(Command("user"))
@@ -173,7 +208,8 @@ async def cmd_user(message: Message) -> None:
         f"Kicked: {fmt_dt(user.kicked_at)}\n\n"
         f"Last partner status: {user.last_client_status or '—'}\n"
         f"Progress flags: {flags}\n"
-        f"Deposit total: ${float(user.last_deposit_total or 0):.2f}\n"
+        f"Deposit tier: {bucket_label(int(user.last_deposit_total or 0))} "
+        f"(range-ID {int(user.last_deposit_total or 0)})\n"
         f"Last trade: {fmt_dt(user.last_trade_at)}\n"
         f"Consecutive API errors: {user.consecutive_api_errors}"
     )
@@ -190,39 +226,49 @@ async def cmd_check(message: Message) -> None:
         return
 
     uid = args[1].strip()
-    await message.answer(f"🔎 Querying Exness for UID {uid}…")
+    await message.answer(f"🔎 Querying Exness for {uid}…")
 
     client = await fetch_client(uid)
     accounts = await fetch_accounts(uid)
+    snap = await fetch_snapshot(uid)
 
-    summary = None
-    if isinstance(accounts, list):
-        summary = summarize_accounts(accounts)
+    parts = [f"Lookup: {uid}"]
 
-    parts = [f"Client lookup: {uid}"]
+    if snap is None:
+        parts.append("⚠️ snapshot: API error / no answer")
+    elif not snap.under_partner:
+        parts.append("❌ NOT under our partner (data=[])")
+    else:
+        act = is_activated(snap.progress_flags, snap.deposit_bucket)
+        parts.append(
+            "✅ Under our partner\n"
+            f"client_uid: {snap.client_uid}\n"
+            f"client_status: {snap.client_status}\n"
+            f"flags: {snap.progress_flags}\n"
+            f"deposit tier: {bucket_label(snap.deposit_bucket)} (range-ID {snap.deposit_bucket})\n"
+            f"FTD tier: {bucket_label(snap.ftd_bucket)} (range-ID {snap.ftd_bucket})\n"
+            f"balance tier: {bucket_label(snap.balance_bucket)} (range-ID {snap.balance_bucket})\n"
+            f"last trade: {snap.last_trade_at}\n"
+            f"=> IS_ACTIVATED: {'YES ✅' if act else 'NO ❌'}"
+        )
+
     if client is None:
-        parts.append("client endpoint: ⚠️ API error / no answer")
+        parts.append("raw clients endpoint: ⚠️ API error / no answer")
     elif client == {}:
-        parts.append("client endpoint: ❌ data=[] (NOT under partner)")
+        parts.append("raw clients endpoint: data=[]")
     else:
         parts.append(
-            "client endpoint: ✅\n"
+            "raw clients endpoint row:\n"
             f"{json.dumps(client, indent=2, default=str)[:1500]}"
         )
 
     if accounts is None:
-        parts.append("accounts endpoint: ⚠️ API error / no answer")
+        parts.append("raw accounts endpoint: ⚠️ API error / no answer")
     else:
         parts.append(
-            f"accounts endpoint: {len(accounts)} record(s)\n"
+            f"raw accounts endpoint: {len(accounts)} record(s)\n"
             f"{json.dumps(accounts, indent=2, default=str)[:1500]}"
         )
-        if summary:
-            parts.append(
-                f"summary → deposit_total={summary['deposit_total']:.2f}, "
-                f"balance={summary['balance']:.2f}, "
-                f"last_trade_at={summary['last_trade_at']}"
-            )
 
     await _send_long(message, "\n\n".join(parts))
 
@@ -454,10 +500,11 @@ async def cmd_export(message: Message) -> None:
     writer.writerow([
         "telegram_id", "username", "first_name", "email", "phone",
         "exness_uid", "status", "started_at", "verified_at",
-        "last_check_at", "last_client_status", "last_deposit_total",
-        "last_trade_at",
+        "last_check_at", "last_client_status", "deposit_tier_id",
+        "deposit_tier", "last_trade_at",
     ])
     for u in rows:
+        tier_id = int(u.last_deposit_total or 0)
         writer.writerow([
             u.telegram_id, u.username or "", u.first_name or "",
             u.email or "", u.phone or "", u.exness_uid or "", u.status,
@@ -465,7 +512,7 @@ async def cmd_export(message: Message) -> None:
             (u.verified_at.isoformat() if u.verified_at else ""),
             (u.last_check_at.isoformat() if u.last_check_at else ""),
             u.last_client_status or "",
-            (str(u.last_deposit_total) if u.last_deposit_total else ""),
+            tier_id, bucket_label(tier_id),
             (u.last_trade_at.isoformat() if u.last_trade_at else ""),
         ])
 
