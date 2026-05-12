@@ -531,29 +531,29 @@ async def fetch_snapshot(uid: str) -> Optional[ClientSnapshot]:
             raw=None,
         )
 
-    deposit_total = _coerce_float(
-        row.get("deposit_amount")
-        or row.get("ftd_amount")
-        or 0
-    )
-    balance = _coerce_float(
-        row.get("client_balance")
-        if row.get("client_balance") is not None
-        else row.get("client_equity")
-    )
+    da = _coerce_float(row.get("deposit_amount"))
+    fa = _coerce_float(row.get("ftd_amount"))
+    cb = _coerce_float(row.get("client_balance"))
+    ce = _coerce_float(row.get("client_equity"))
+    # `deposit_amount` is the running total of deposits; `ftd_amount` is the
+    # first-time-deposit amount. Take whichever is larger so a real deposit
+    # is recognized regardless of which field Exness fills in.
+    deposit_total = max(da, fa, 0.0)
+    balance = cb if row.get("client_balance") is not None else ce
     last_trade = _last_trade_from_record(row)
     progress_flags = _flags_from_record(row)
 
-    # Exness returns placeholder "1" for deposit_amount / client_balance /
-    # client_equity / ftd_amount on accounts that have never made a real
-    # deposit AND never traded. The only truly reliable signals are the
-    # boolean flags, so zero those numbers out when neither flag is set
-    # — a user with ftt_made (rare bonus-only account) might still have a
-    # real balance, so we leave their numbers alone.
-    has_real_activity = (
-        "ftd_received" in progress_flags or "ftt_made" in progress_flags
+    # Exness returns the placeholder "1" across ALL numeric fields on
+    # accounts that have never deposited AND never traded (deposit_amount=1,
+    # client_balance=1, client_equity=1, ftd_amount=1, no progress flags).
+    # Recognize that exact pattern and treat it as zero — but ONLY that
+    # pattern. Any value above the placeholder is a real figure and must be
+    # trusted, even if the ftd_received flag hasn't flipped yet (it lags).
+    no_flags = (
+        "ftd_received" not in progress_flags and "ftt_made" not in progress_flags
     )
-    if not has_real_activity:
+    looks_like_placeholder = no_flags and da <= 1 and fa <= 1 and cb <= 1 and ce <= 1
+    if looks_like_placeholder:
         deposit_total = 0.0
         balance = 0.0
 
@@ -574,25 +574,22 @@ async def fetch_snapshot(uid: str) -> Optional[ClientSnapshot]:
 # ---------------------------------------------------------------------------
 def is_activated(progress_flags: list[str], deposit_total_usd: float,
                  *, require_trade: bool | None = None) -> bool:
-    """A real first-time deposit of at least MIN_DEPOSIT_USD is mandatory.
+    """Activation = the reported deposit total is at least MIN_DEPOSIT_USD.
 
-    The bare ``ftt_made`` path is intentionally gone: a no-deposit bonus
-    trade (which sets ftt_made without ftd_received) used to grant VIP
-    access, which is exactly what we don't want. If ACTIVATION_REQUIRE_TRADE
-    is on, a first trade is *also* required on top of the deposit.
+    We gate on the deposit **amount**, not on the ``ftd_received`` boolean
+    flag: on some accounts that flag lags behind the deposit figure for
+    hours, which left genuine depositors stuck on "pending — make a
+    deposit". A no-deposit bonus trade (ftt_made without any real deposit)
+    still doesn't qualify, because the deposit amount stays at/below the
+    placeholder "1" — well under MIN_DEPOSIT_USD.
 
-    ``ftd_received`` is a sticky flag on the Exness side — once true it
-    stays true even after a withdrawal — so a real depositor never trips
-    this check during re-verification.
+    If ACTIVATION_REQUIRE_TRADE is on, a first trade is *also* required on
+    top of the qualifying deposit.
     """
     if require_trade is None:
         require_trade = ACTIVATION_REQUIRE_TRADE
-    flags = set(progress_flags or [])
-    has_qualifying_deposit = (
-        "ftd_received" in flags and (deposit_total_usd or 0) >= MIN_DEPOSIT_USD
-    )
-    if not has_qualifying_deposit:
+    if (deposit_total_usd or 0) < MIN_DEPOSIT_USD:
         return False
     if require_trade:
-        return "ftt_made" in flags
+        return "ftt_made" in set(progress_flags or [])
     return True

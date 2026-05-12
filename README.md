@@ -42,13 +42,17 @@ auto-removed.
    * **Not connected under your partner** → "❌ Your account is
      currently not connected under our partner link" + buttons:
      🔀 Switch Partner, ✏️ I entered the wrong ID, 📊 Check My Status.
-   * **Connected but not activated** → "🟡 Almost there!" — a first
-     deposit of ≥ `$MIN_DEPOSIT_USD` is required (a no-deposit bonus
-     trade does *not* count); if `ACTIVATION_REQUIRE_TRADE=true` a
-     trade is also required. Direct deep links to **💵 Make a Deposit**
-     and **📈 Open Exness (Trade)**. The bot auto-checks every
-     `PENDING_POLL_MINUTES` for the next `PENDING_AUTO_GIVEUP_HOURS`
-     hours; after that, the user taps **🔁 Re-check now** to resume.
+   * **Connected but not activated** → "🟡 Almost there!" — a deposit
+     of ≥ `$MIN_DEPOSIT_USD` is required (a no-deposit bonus trade does
+     *not* count). The check is on the deposit **amount** Exness
+     reports, so it works even before Exness flips its internal
+     "first-deposit received" flag — sometimes there's a short lag
+     between the deposit landing and the flag, and the bot doesn't wait
+     for it. If `ACTIVATION_REQUIRE_TRADE=true`, a trade is also
+     required. Direct deep links to **💵 Make a Deposit** and **📈 Open
+     Exness (Trade)**. The bot auto-checks every `PENDING_POLL_MINUTES`
+     for the next `PENDING_AUTO_GIVEUP_HOURS` hours; after that, the
+     user taps **🔁 Re-check now** to resume.
    * **Activated** → "🎉 Congratulations! ✅ VIP Access Approved" + a
      single-use channel invite link that expires in 24 hours. The bot
      auto-approves the join request. A **🔗 Get Invite Link Again**
@@ -66,12 +70,11 @@ Every `RECHECK_INTERVAL_HOURS`, the bot re-verifies every active member:
 
 * **Partner change** / `LEFT` / `CHANGING` / no longer in your client
   list → kicked immediately with a DM explaining why.
-* **No qualifying deposit** — account is still under the partner and
-  `ACTIVE` but doesn't meet the activation gate (no first deposit ≥
-  `$MIN_DEPOSIT_USD`) → kicked. The `ftd_received` flag is sticky on
-  Exness's side once true, so this only ever catches accounts that got
-  in without a real deposit (e.g. a no-deposit bonus trade), never a
-  genuine depositor.
+* **No qualifying deposit** — account is still under the partner but
+  the reported deposit total is below `$MIN_DEPOSIT_USD` → kicked. A
+  genuine depositor's total doesn't drop below the threshold, so this
+  only ever catches accounts that got in without a real deposit (e.g. a
+  no-deposit bonus trade).
 * **Inactivity** past `INACTIVITY_WARN_DAYS` (no trades) → warned via
   DM. If still inactive after `WARNING_GRACE_DAYS`, kicked. If they
   trade again before the kick, automatically restored. (Users who
@@ -133,7 +136,7 @@ sudo ./deploy.sh
 | `EXNESS_PARTNER_CODE` | Your partner code (e.g. `gxzo6189vp`). Shown to users who already have an Exness account so they can ask Exness Live Chat to switch their partner code to yours. |
 | `EXNESS_DEPOSIT_URL` | Deep link to the Exness deposit page. Default `https://my.exness.com/pa/payments-and-wallet/deposit`. Override only if Exness changes the URL. |
 | `EXNESS_PA_URL` | Deep link to the Exness Personal Area (used as the "Open Exness (Trade)" button on the pending screen). Default `https://my.exness.com/pa/`. |
-| `MIN_DEPOSIT_USD` | First-deposit threshold required to activate (default `50`). A deposit at or above this is always mandatory — a no-deposit bonus trade does not count. |
+| `MIN_DEPOSIT_USD` | Deposit threshold required to activate (default `50`). Checked against the deposit *amount* Exness reports — works even before Exness flips its "first-deposit received" flag. A no-deposit bonus trade does not count. |
 | `ACTIVATION_REQUIRE_TRADE` | `true` = also require the user to have placed a first trade (on top of the deposit). Default `false`. |
 | `INACTIVITY_WARN_DAYS` | DM a warning after this many days idle (default `11`) |
 | `INACTIVITY_KICK_DAYS` | Kick threshold for hard inactivity (default `14`) |

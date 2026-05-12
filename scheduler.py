@@ -260,13 +260,13 @@ async def recheck_one_user(bot: Bot, user: User, now: datetime | None = None) ->
         return f"kicked_partner_changed ({reason})"
 
     # ---- no longer meets the activation gate → kick ----
-    # `is_activated` requires a real first-time deposit (ftd_received,
-    # which is sticky on Exness's side once true). So this only ever
-    # catches accounts that slipped in without one — e.g. a no-deposit
-    # bonus trade — never a genuine depositor. We check regardless of
-    # client_status: an account that doesn't meet the gate shouldn't be
-    # in the channel whether Exness marks it ACTIVE or INACTIVE.
-    # (LEFT / CHANGING are already handled above.)
+    # `is_activated` checks the reported deposit total against
+    # MIN_DEPOSIT_USD. So this catches accounts that slipped in without a
+    # real qualifying deposit (e.g. a no-deposit bonus trade) — a genuine
+    # depositor's total doesn't drop below the threshold on re-check.
+    # Checked regardless of client_status: an account that doesn't meet
+    # the gate shouldn't be in the channel whether Exness marks it ACTIVE
+    # or INACTIVE. (LEFT / CHANGING are already handled above.)
     if not is_activated(snap.progress_flags, snap.deposit_total):
         await _kick_from_channel(bot, user.telegram_id)
         await _mark_kicked(
@@ -289,11 +289,11 @@ async def recheck_one_user(bot: Bot, user: User, now: datetime | None = None) ->
         return "kicked_not_activated"
 
     # ---- balance ≈ 0 after a real deposit history → withdrew everything ----
-    # Trust the ftd_received flag as the truth source: numeric
-    # deposit_amount / client_balance can be the placeholder "1" that
-    # Exness returns for never-deposited accounts. Once a user has
-    # ftd_received=true, an empty balance signals a withdrawal.
-    had_deposits = "ftd_received" in (snap.progress_flags or [])
+    # "had deposits" = the reported deposit total cleared the activation
+    # threshold at some point. An empty balance now means they withdrew.
+    # (deposit_total stays at/below the placeholder "1" for accounts that
+    # never deposited, so this never false-fires on them.)
+    had_deposits = (snap.deposit_total or 0) >= MIN_DEPOSIT_USD
     if had_deposits and (snap.balance or 0) < 1.0:
         await _kick_from_channel(bot, user.telegram_id)
         await _mark_kicked(
