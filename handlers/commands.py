@@ -451,8 +451,8 @@ async def _verify_and_route(user: User, message: Message, bot: Bot) -> None:
         }).save()
         await _audit(user.telegram_id, "not_under_partner", f"uid={user.exness_uid}")
         await message.answer(
-            "❌ Your account is currently not connected under our partner "
-            "link.\n\n"
+            "❌ Your trading account is currently not connected under our "
+            "partner link.\n\n"
             "To access the VIP community, complete the partner switch "
             "process first — or, if you mistyped, fix your Exness ID.",
             reply_markup=kb_not_connected(),
