@@ -52,6 +52,13 @@ class VerifyState(StatesGroup):
     awaiting_uid = State()
 
 
+class EditState(StatesGroup):
+    """Standalone "Update My Info" flow — independent of the join funnel so
+    a verified user can fix a typo without retriggering the whole pipeline."""
+    awaiting_new_email = State()
+    awaiting_new_phone = State()
+
+
 # ---------------------------------------------------------------------------
 # Small helpers used to interpolate the client's templated copy.
 # ---------------------------------------------------------------------------
@@ -69,14 +76,31 @@ def _partner_code_html() -> str:
 # Keyboards
 # ---------------------------------------------------------------------------
 def kb_main_menu() -> InlineKeyboardMarkup:
-    """Exact button order requested by the client:
-    How It Works → Register on Exness → Join VIP for Free → Check Status."""
+    """Top 4 buttons follow the client's exact required order
+    (How It Works → Register on Exness → Join VIP for Free → Check Status).
+    "Update My Info" is appended below so the required order is preserved."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📖 How It Works", callback_data="how_it_works")],
         [InlineKeyboardButton(text="🟢 Register on Exness", callback_data="register_exness")],
         [InlineKeyboardButton(text="🚀 Join VIP for Free", callback_data="join_vip")],
         [InlineKeyboardButton(text="📊 Check Status", callback_data="check_status")],
+        [InlineKeyboardButton(text="✏️ Update My Info", callback_data="update_info")],
     ])
+
+
+def kb_update_info_menu(has_email: bool, has_phone: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            text=("✏️ Change Email" if has_email else "📧 Add Email"),
+            callback_data="update_email",
+        )],
+        [InlineKeyboardButton(
+            text=("✏️ Change Phone" if has_phone else "📱 Add Phone"),
+            callback_data="update_phone",
+        )],
+        [InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_to_menu")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb_back_to_menu(extra_join: bool = True) -> InlineKeyboardMarkup:
@@ -807,6 +831,131 @@ async def cb_cancel_verify(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 # ---------------------------------------------------------------------------
+# "Update My Info" — change email / phone without re-running the join funnel.
+# ---------------------------------------------------------------------------
+def _update_info_screen_text(user: User | None) -> str:
+    email = (user.email if user else None) or "—"
+    phone = (user.phone if user else None) or "—"
+    return (
+        "✏️ Update My Info\n\n"
+        f"📧 Email: {html.escape(email)}\n"
+        f"📱 Phone: {html.escape(phone)}\n\n"
+        "Tap a field below to change it."
+    )
+
+
+@router.callback_query(F.data == "update_info")
+async def cb_update_info(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    user = await User.filter(telegram_id=callback.from_user.id).first()
+    await _safe_edit(
+        callback,
+        _update_info_screen_text(user),
+        reply_markup=kb_update_info_menu(bool(user and user.email), bool(user and user.phone)),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "update_email")
+async def cb_update_email(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(EditState.awaiting_new_email)
+    try:
+        await callback.message.answer(
+            "📧 Send the new email address you want on file.\n\n"
+            "Tap Cancel to keep the current one.",
+            reply_markup=kb_cancel(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "update_phone")
+async def cb_update_phone(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(EditState.awaiting_new_phone)
+    await callback.message.answer(
+        "📱 Share the new phone number using the button below, or type it in "
+        "international format (e.g. +14155551234).\n\nTap Cancel to keep the "
+        "current one.",
+        reply_markup=kb_phone_request(),
+    )
+    await callback.message.answer("⤴️", reply_markup=kb_cancel())
+
+
+@router.message(StateFilter(EditState.awaiting_new_email), F.text)
+async def on_new_email_input(message: Message, state: FSMContext) -> None:
+    email = normalize_email(message.text)
+    if not email:
+        await message.answer(
+            "That doesn't look like a valid email address.\n\n"
+            "Please enter the new email (e.g. name@example.com), or tap Cancel "
+            "to keep the current one.",
+            reply_markup=kb_cancel(),
+        )
+        return
+    user = await _ensure_user(message.from_user)
+    old = user.email or "—"
+    user.email = email
+    await user.save()
+    await state.clear()
+    await _audit(user.telegram_id, "email_updated", f"{old} -> {email}")
+    await message.answer(
+        f"✅ Email updated to <code>{html.escape(email)}</code>.",
+        reply_markup=kb_main_menu(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(StateFilter(EditState.awaiting_new_phone), F.contact)
+async def on_new_phone_contact(message: Message, state: FSMContext) -> None:
+    contact = message.contact
+    if contact.user_id and contact.user_id != message.from_user.id:
+        await message.answer(
+            "Please share your own phone number using the button below.",
+            reply_markup=kb_phone_request(),
+        )
+        return
+    phone = normalize_phone(contact.phone_number)
+    user = await _ensure_user(message.from_user)
+    old = user.phone or "—"
+    user.phone = phone
+    await user.save()
+    await state.clear()
+    await _audit(user.telegram_id, "phone_updated", f"{old} -> {phone}")
+    await message.answer(
+        f"✅ Phone updated to {html.escape(phone or '—')}.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await message.answer("Back to the menu.", reply_markup=kb_main_menu())
+
+
+@router.message(StateFilter(EditState.awaiting_new_phone), F.text)
+async def on_new_phone_text(message: Message, state: FSMContext) -> None:
+    phone = normalize_phone(message.text)
+    if not phone or len(phone) < 8:
+        await message.answer(
+            "That doesn't look like a valid phone number.\n\n"
+            "Tap “Share my phone” below, type it in international format "
+            "(e.g. +14155551234), or tap Cancel to keep the current one.",
+            reply_markup=kb_phone_request(),
+        )
+        return
+    user = await _ensure_user(message.from_user)
+    old = user.phone or "—"
+    user.phone = phone
+    await user.save()
+    await state.clear()
+    await _audit(user.telegram_id, "phone_updated", f"{old} -> {phone}")
+    await message.answer(
+        f"✅ Phone updated to {html.escape(phone)}.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await message.answer("Back to the menu.", reply_markup=kb_main_menu())
+
+
+# ---------------------------------------------------------------------------
 # FSM step 1 — email
 # ---------------------------------------------------------------------------
 @router.message(StateFilter(VerifyState.awaiting_email), F.text)
@@ -868,19 +1017,64 @@ async def on_phone_text(message: Message, state: FSMContext, bot: Bot) -> None:
 # ---------------------------------------------------------------------------
 # FSM step 3 — Exness ID (trading account number / UUID / hex prefix)
 # ---------------------------------------------------------------------------
+import re as _re
+
+# Match exactly one of the three accepted forms — anything else is rejected
+# up-front so we never store an email-shaped string as someone's Exness ID
+# (the API would silently 500 or return NOT_FOUND, the user would see
+# "not connected under our partner link" with no idea why).
+_UID_DIGITS_RE = _re.compile(r"^\d{6,12}$")            # trading account number
+_UID_HEX_RE = _re.compile(r"^[0-9a-f]{6,36}$")          # short or full hex client_uid
+_UID_UUID_RE = _re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+def _validate_exness_uid(raw: str) -> tuple[str | None, str | None]:
+    """Return (canonical_uid, error_message). Exactly one is non-None."""
+    cleaned = raw.strip().strip("​‌‍")  # strip zero-width chars too
+    if not cleaned:
+        return None, (
+            "That looks empty. Send your trading account number (8-9 digits, "
+            "e.g. 12345678) or full Client UUID. Tap Cancel to stop."
+        )
+
+    lower = cleaned.lower()
+
+    # Email-shaped input is by far the most common mistake — call it out.
+    if "@" in cleaned or any(
+        tld in lower for tld in (".com", ".net", ".org", ".io", ".co.")
+    ):
+        return None, (
+            "❌ That looks like an email address, not your Exness ID.\n\n"
+            "Your Exness ID is the 8-9 digit trading account number (e.g. "
+            "<code>12345678</code>) shown above the balance in the Exness "
+            "app, or on the “My Accounts” page on my.exness.com.\n\n"
+            "Send just the digits — not your email, password, or login."
+        )
+
+    if _UID_UUID_RE.match(lower):
+        return lower, None
+    if _UID_DIGITS_RE.match(cleaned):
+        return cleaned, None
+    if _UID_HEX_RE.match(lower):
+        return lower, None
+
+    return None, (
+        "That doesn't look like a valid Exness ID.\n\n"
+        "Send your <b>trading account number</b> — 8-9 digits like "
+        "<code>12345678</code>, shown above the balance in the Exness "
+        "app. Not your email or password. Tap Cancel to stop."
+    )
+
+
 @router.message(StateFilter(VerifyState.awaiting_uid), F.text)
 async def on_uid_input(message: Message, state: FSMContext, bot: Bot) -> None:
-    raw = (message.text or "").strip()
-    cleaned = "".join(ch for ch in raw if ch.isalnum() or ch == "-").strip("-")
-    if not cleaned or len(cleaned) < 4:
-        await message.answer(
-            "That doesn't look like a valid Exness ID.\n\n"
-            "Send your trading account number (8-9 digits, e.g. 12345678) "
-            "or your full Client UUID. Try again, or tap Cancel.",
-            reply_markup=kb_cancel(),
-        )
+    raw = message.text or ""
+    uid, err = _validate_exness_uid(raw)
+    if err:
+        await message.answer(err, reply_markup=kb_cancel(), parse_mode="HTML")
         return
-    uid = cleaned
 
     other = await User.filter(exness_uid=uid).exclude(telegram_id=message.from_user.id).first()
     if other:
